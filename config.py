@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     # Security settings
     jwt_secret: str
     jwt_algorithm: str = "HS256"
+    algorithm: str = "HS256"  
     jwt_expiration: int = 30
     secret_key: str
 

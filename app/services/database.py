@@ -265,6 +265,121 @@ async def update_last_login(user_id: str) -> bool:
     )
     return result.modified_count > 0
 
+@handle_db_errors
+async def get_locations() -> List[Dict]:
+    """Get all ATS locations with their stats."""
+    try:
+        # Get locations from MongoDB
+        locations = await db.locations.find().to_list(None)
+        
+        # Get stats for each location
+        response = []
+        for location in locations:
+            location_stats = await db.stats.find_one({"location_id": location["_id"]})
+            
+            response.append({
+                "name": location["name"],
+                "lat": location["lat"],
+                "lng": location["lng"],
+                "contact": {
+                    "name": location["contact_name"],
+                    "phone": location["contact_phone"],
+                    "email": location["contact_email"]
+                },
+                "stats": {
+                    "totalVehicles": location_stats["total_vehicles"] if location_stats else 0,
+                    "atsCenters": location_stats["ats_centers"] if location_stats else 0,
+                    "vehiclesUnder8": location_stats["vehicles_under_8"] if location_stats else 0,
+                    "vehiclesOver8": location_stats["vehicles_over_8"] if location_stats else 0
+                }
+            })
+        
+        return response
+    except Exception as e:
+        logger.error(f"Database error in get_locations: {str(e)}")
+        raise Exception(f"Database operation failed: {str(e)}")
+
+@handle_db_errors
+async def get_overall_stats() -> Dict:
+    """Get aggregated statistics for all locations."""
+    try:
+        pipeline = [
+            {
+                "$group": {
+                    "_id": None,
+                    "totalVehicles": {"$sum": "$total_vehicles"},
+                    "atsCenters": {"$sum": "$ats_centers"},
+                    "vehiclesUnder8": {"$sum": "$vehicles_under_8"},
+                    "vehiclesOver8": {"$sum": "$vehicles_over_8"}
+                }
+            }
+        ]
+        
+        result = await db.stats.aggregate(pipeline).to_list(None)
+        
+        if not result:
+            return {
+                "totalVehicles": 0,
+                "atsCenters": 0,
+                "vehiclesUnder8": 0,
+                "vehiclesOver8": 0
+            }
+            
+        stats = result[0]
+        stats.pop("_id", None)
+        return stats
+    except Exception as e:
+        logger.error(f"Database error in get_overall_stats: {str(e)}")
+        raise Exception(f"Database operation failed: {str(e)}")
+
+# Add these functions to create initial data
+async def create_initial_location(location_data: Dict) -> str:
+    """Create a new location."""
+    result = await db.locations.insert_one(location_data)
+    return str(result.inserted_id)
+
+async def create_initial_stats(stats_data: Dict) -> str:
+    """Create initial statistics for a location."""
+    result = await db.stats.insert_one(stats_data)
+    return str(result.inserted_id)
+
+async def initialize_sample_data():
+    """Initialize sample data for locations and stats."""
+    try:
+        # Check if data already exists
+        existing_locations = await db.locations.count_documents({})
+        if existing_locations > 0:
+            return
+            
+        # Sample location data
+        locations = [
+            {
+                "name": "Visakhapatnam",
+                "lat": 17.6868,
+                "lng": 83.2185,
+                "contact_name": "Harsha Kanumalla",
+                "contact_phone": "+91-9876541230",
+                "contact_email": "hkanumalla@utonenergia.com"
+            },
+            # Add other locations here
+        ]
+        
+        # Create locations and their stats
+        for location in locations:
+            location_id = await create_initial_location(location)
+            await create_initial_stats({
+                "location_id": location_id,
+                "total_vehicles": 85,
+                "ats_centers": 5,
+                "vehicles_under_8": 55,
+                "vehicles_over_8": 30
+            })
+            
+        logger.info("Sample data initialized successfully")
+    except Exception as e:
+        logger.error(f"Error initializing sample data: {str(e)}")
+        raise
+
 async def create_indexes():
     """Create database indexes if they don't exist."""
     try:

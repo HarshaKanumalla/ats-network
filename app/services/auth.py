@@ -74,8 +74,6 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     """Create JWT access token."""
     try:
         settings = get_settings()
-        algorithm = settings.jwt_algorithm  # Explicitly get the algorithm
-        logger.info(f"Using algorithm: {algorithm}")  # Add logging
         
         to_encode = data.copy()
         if expires_delta:
@@ -87,17 +85,17 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
         encoded_jwt = jwt.encode(
             to_encode, 
             settings.secret_key,
-            algorithm=algorithm  # Use the explicitly retrieved algorithm
+            algorithm="HS256"  # Explicitly set the algorithm
         )
         return encoded_jwt
     except Exception as e:
         logger.error(f"Token creation error details: {str(e)}")
-        logger.error(f"Settings available: {vars(get_settings())}")  # Log available settings
+        logger.error(f"Settings available: {vars(get_settings())}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Could not create access token"
         )
-
+        
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
     """Get current user from JWT token."""
     credentials_exception = HTTPException(

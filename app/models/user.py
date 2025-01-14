@@ -1,3 +1,4 @@
+# backend/app/models/__user__.py
 from typing import Any, Optional, List, Dict, Annotated
 from pydantic import BaseModel, EmailStr, Field, field_validator, ConfigDict, GetCoreSchemaHandler
 from pydantic_core import core_schema
