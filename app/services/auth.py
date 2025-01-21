@@ -1,22 +1,18 @@
 # backend/app/services/auth.py
+
 from datetime import datetime, timedelta
-from typing import Optional, Union
-from fastapi import Depends, HTTPException, status
+from typing import Optional, Tuple
+from fastapi import Depends, HTTPException, status, Response, Cookie
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 import logging
 from bson import ObjectId
+import redis
 
 from ..config import get_settings
 from ..models.user import User, UserInDB, TokenData, Role
 from ..services.database import get_user_by_email, get_user_by_id
-
-# System Info
-SYSTEM_INFO = {
-    "last_updated": "2024-12-19 18:20:27",
-    "updated_by": "HarshaKanumalla"
-}
+from ..core.security import verify_password, get_password_hash
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -24,138 +20,213 @@ logger = logging.getLogger(__name__)
 # Get settings
 settings = get_settings()
 
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
 # OAuth2 scheme
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a plain password against a hashed password."""
-    return pwd_context.verify(plain_password, hashed_password)
+# Redis client for token blacklisting
+redis_client = redis.Redis(
+    host=settings.redis_host,
+    port=settings.redis_port,
+    db=settings.redis_db,
+    password=settings.redis_password,
+    decode_responses=True
+)
 
-def get_password_hash(password: str) -> str:
-    """Generate password hash."""
-    return pwd_context.hash(password)
-
-async def authenticate_user(email: str, password: str) -> Union[UserInDB, bool]:
-    """Authenticate a user with email and password."""
+async def authenticate_user(username: str, password: str) -> Optional[User]:
+    """Authenticate a user and return user object if successful."""
+    logger.info(f"Starting authentication process for user: {username}")
+    
     try:
-        logger.info(f"Attempting authentication for email: {email}")
-        
-        user = await get_user_by_email(email)
+        # Step 1: Get user by email
+        user = await get_user_by_email(username)
         if not user:
-            logger.error(f"No user found with email: {email}")
-            return False
-            
-        logger.info(f"Stored hash: {user.hashed_password}")
-        logger.info(f"Attempting to verify password: {password}")
-        
-        # Generate a new hash for comparison
-        test_hash = pwd_context.hash(password)
-        logger.info(f"Generated test hash: {test_hash}")
-        
-        verification_result = verify_password(password, user.hashed_password)
-        logger.info(f"Password verification result: {verification_result}")
-        
-        if not verification_result:
-            logger.error("Password verification failed")
-            return False
-            
-        logger.info("Authentication successful")
-        return user
-        
-    except Exception as e:
-        logger.error(f"Authentication error: {str(e)}")
-        logger.exception("Detailed error:")
-        return False
+            logger.warning(f"User not found: {username}")
+            return None
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    """Create JWT access token."""
+        logger.info(f"User found: {username}")
+
+        # Step 2: Verify password
+        if not verify_password(password, user.hashed_password):
+            logger.warning(f"Invalid password for user: {username}")
+            return None
+
+        logger.info(f"Password verified for user: {username}")
+
+        # Step 3: Check if user is active
+        if not user.is_active:
+            logger.warning(f"Inactive user attempted login: {username}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Inactive user"
+            )
+
+        logger.info(f"User active status verified: {username}")
+        return user
+
+    except HTTPException as he:
+        logger.error(f"HTTP Exception during authentication: {str(he)}")
+        raise he
+    except Exception as e:
+        logger.error(f"Unexpected error during authentication: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Authentication error: {str(e)}"
+        )
+
+def create_tokens(user_data: dict) -> Tuple[str, str]:
+    """Create access and refresh tokens."""
     try:
-        settings = get_settings()
-        
+        # Access token - short lived (30 minutes)
+        access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
+        access_token = create_token(
+            data={
+                "sub": str(user_data["id"]),
+                "email": user_data["email"],
+                "role": user_data["role"],
+                "type": "access"
+            },
+            expires_delta=access_token_expires,
+            secret_key=settings.access_token_secret
+        )
+
+        # Refresh token - long lived (7 days)
+        refresh_token_expires = timedelta(days=settings.refresh_token_expire_days)
+        refresh_token = create_token(
+            data={
+                "sub": str(user_data["id"]),
+                "type": "refresh"
+            },
+            expires_delta=refresh_token_expires,
+            secret_key=settings.refresh_token_secret
+        )
+
+        return access_token, refresh_token
+    except Exception as e:
+        logger.error(f"Token creation error: {str(e)}")
+        raise
+
+def create_token(data: dict, expires_delta: timedelta, secret_key: str) -> str:
+    """Create a JWT token."""
+    try:
         to_encode = data.copy()
-        if expires_delta:
-            expire = datetime.utcnow() + expires_delta
-        else:
-            expire = datetime.utcnow() + timedelta(minutes=settings.jwt_expiration)
+        expire = datetime.utcnow() + expires_delta
+        to_encode.update({"exp": int(expire.timestamp())})
         
-        to_encode.update({"exp": expire})
         encoded_jwt = jwt.encode(
-            to_encode, 
-            settings.secret_key,
-            algorithm="HS256"  # Explicitly set the algorithm
+            to_encode,
+            secret_key,
+            algorithm=settings.token_algorithm
         )
         return encoded_jwt
     except Exception as e:
-        logger.error(f"Token creation error details: {str(e)}")
-        logger.error(f"Settings available: {vars(get_settings())}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Could not create access token"
+        logger.error(f"Token encoding error: {str(e)}")
+        raise
+
+def verify_token(token: str, secret_key: str) -> Optional[dict]:
+    """Verify a token and return its payload."""
+    try:
+        payload = jwt.decode(
+            token,
+            secret_key,
+            algorithms=[settings.token_algorithm]
         )
-        
-async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
-    """Get current user from JWT token."""
+        return payload
+    except JWTError as e:
+        logger.error(f"Token verification failed: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"Token verification error: {str(e)}")
+        return None
+
+def is_token_blacklisted(token: str) -> bool:
+    """Check if a token is blacklisted."""
+    try:
+        return bool(redis_client.exists(f"blacklist:{token}"))
+    except redis.RedisError as e:
+        logger.error(f"Redis error checking blacklist: {str(e)}")
+        return False
+
+def blacklist_token(token: str, expires_in: int) -> None:
+    """Add a token to the blacklist."""
+    try:
+        redis_client.setex(f"blacklist:{token}", expires_in, "1")
+    except redis.RedisError as e:
+        logger.error(f"Redis error adding to blacklist: {str(e)}")
+
+async def get_current_user(
+    token: str = Depends(oauth2_scheme),
+    refresh_token: Optional[str] = Cookie(None, alias="refresh_token")
+) -> User:
+    """Get current user from token with auto-refresh capability."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
     try:
-        payload = jwt.decode(
-            token, 
-            settings.secret_key, 
-            algorithms=[settings.algorithm]
-        )
-        user_id: str = payload.get("sub")
-        if user_id is None:
+        if is_token_blacklisted(token):
             raise credentials_exception
-        
-        token_data = TokenData(
-            user_id=user_id,
-            email=payload.get("email"),
-            role=payload.get("role", Role.USER),
-            exp=payload.get("exp")
-        )
+
+        payload = verify_token(token, settings.access_token_secret)
+        if not payload:
+            if refresh_token:
+                refresh_payload = verify_token(refresh_token, settings.refresh_token_secret)
+                if refresh_payload and refresh_payload.get("type") == "refresh":
+                    user = await get_user_by_id(ObjectId(refresh_payload.get("sub")))
+                    if user:
+                        return user
+            raise credentials_exception
+
+        user_id = payload.get("sub")
+        if not user_id:
+            raise credentials_exception
+
+        user = await get_user_by_id(ObjectId(user_id))
+        if not user:
+            raise credentials_exception
+
+        if not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Inactive user"
+            )
+
+        return user
     except JWTError as e:
-        logger.error(f"JWT decode error: {str(e)}")
+        logger.error(f"JWT error: {str(e)}")
         raise credentials_exception
     except Exception as e:
-        logger.error(f"Token validation error: {str(e)}")
+        logger.error(f"Authentication error: {str(e)}")
         raise credentials_exception
 
-    user = await get_user_by_id(ObjectId(token_data.user_id))
-    if user is None:
-        raise credentials_exception
-    return user
+def set_refresh_token_cookie(response: Response, refresh_token: str) -> None:
+    """Set refresh token as HTTP-only cookie."""
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=settings.cookie_secure,
+        domain=settings.cookie_domain,
+        samesite=settings.cookie_samesite,
+        max_age=settings.refresh_token_expire_days * 24 * 60 * 60
+    )
 
-async def get_current_active_user(current_user: User = Depends(get_current_user)) -> User:
-    """Get current active user."""
-    if not current_user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Inactive user"
-        )
-    return current_user
+def clear_refresh_token_cookie(response: Response) -> None:
+    """Clear refresh token cookie."""
+    response.delete_cookie(
+        key="refresh_token",
+        httponly=True,
+        secure=settings.cookie_secure,
+        domain=settings.cookie_domain,
+        samesite=settings.cookie_samesite
+    )
 
 async def get_current_admin_user(current_user: User = Depends(get_current_user)) -> User:
-    """Get current admin user."""
+    """Verify the current user is an admin."""
     if current_user.role != Role.ADMIN:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions"
+            detail="Admin privileges required"
         )
     return current_user
-
-# Export functions
-__all__ = [
-    'verify_password',
-    'get_password_hash',
-    'authenticate_user',
-    'create_access_token',
-    'get_current_user',
-    'get_current_active_user',
-    'get_current_admin_user'
-]
