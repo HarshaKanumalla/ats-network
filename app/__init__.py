@@ -1,7 +1,3 @@
 # backend/app/__init__.py
-from .routes import auth_router, admin_router
+# This file should be empty
 
-__all__ = [
-    'auth_router',
-    'admin_router'
-]

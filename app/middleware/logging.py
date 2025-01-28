@@ -1,44 +1,55 @@
-# backend/app/middleware/logging.py
-
+"""Request logging middleware."""
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 import logging
 import time
-import traceback
 import json
+from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
-class RequestLoggingMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
+class RequestLogger(BaseHTTPMiddleware):
+    """Handles request logging and performance monitoring."""
+
+    async def dispatch(self, request: Request, call_next: Any) -> Any:
+        """Log request details and timing."""
         start_time = time.time()
         
         try:
-            # Log request details
-            logger.info(f"Incoming request: {request.method} {request.url.path}")
-            logger.info(f"Request headers: {dict(request.headers)}")
-            
-            # For specific endpoints, log request body
-            if request.url.path == "/auth/login":
-                try:
-                    body = await request.body()
-                    logger.info(f"Request body for {request.url.path}: {body.decode()}")
-                except Exception as e:
-                    logger.error(f"Error reading request body: {str(e)}")
-
-            # Process the request
+            await self._log_request_details(request)
             response = await call_next(request)
-            
-            # Log response details
-            process_time = time.time() - start_time
-            status_code = response.status_code
-            logger.info(f"Response status: {status_code}")
-            logger.info(f"Request completed in {process_time:.2f}s")
-            
+            await self._log_response_details(response, start_time)
             return response
             
         except Exception as e:
-            logger.error("Exception in request processing:")
-            logger.error(f"Error details: {str(e)}")
-            logger.error(f"Stack trace: {traceback.format_exc()}")
+            logger.error("Request processing error:", exc_info=True)
             raise
+
+    async def _log_request_details(self, request: Request) -> None:
+        """Log incoming request details."""
+        log_data = {
+            "method": request.method,
+            "path": request.url.path,
+            "headers": dict(request.headers),
+            "client": request.client.host if request.client else None
+        }
+
+        if request.url.path == "/auth/login":
+            try:
+                body = await request.body()
+                log_data["body"] = body.decode()
+            except Exception as e:
+                logger.error(f"Error reading request body: {str(e)}")
+
+        logger.info("Incoming request: %s", json.dumps(log_data))
+
+    async def _log_response_details(self, response: Any, start_time: float) -> None:
+        """Log response details and timing."""
+        process_time = time.time() - start_time
+        log_data = {
+            "status_code": response.status_code,
+            "process_time": f"{process_time:.2f}s",
+            "headers": dict(response.headers)
+        }
+        
+        logger.info("Response details: %s", json.dumps(log_data))

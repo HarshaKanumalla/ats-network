@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Registration Confirmation</title>
+</head>
+<body>
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2>Welcome to ATS Network</h2>
+        <p>Dear {{ user_name }},</p>
+        <p>Thank you for registering with ATS Network. Your registration details are:</p>
+        <ul style="list-style-type: none; padding-left: 0;">
+            <li>Email: {{ email }}</li>
+            <li>ATS Address: {{ ats_address }}</li>
+            <li>City: {{ city }}</li>
+            <li>Status: {{ status }}</li>
+        </ul>
+        <p>Your registration is currently under review. We will notify you once it has been processed.</p>
+        <p>Best regards,<br>ATS Network Team</p>
+    </div>
+</body>
+</html>

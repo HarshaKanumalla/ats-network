@@ -1,61 +1,71 @@
-# backend/app/routes/stats.py
+"""Statistics routes for centralized analytics and reporting."""
 from fastapi import APIRouter, Depends, HTTPException, status
-from typing import Dict
+from typing import Dict, Any
 import logging
-from ..services.auth import get_current_user
+
 from ..models.user import User
-from motor.motor_asyncio import AsyncIOMotorClient
-from ..config import get_settings
+from ..services.auth import get_current_user
+from ..services.database import get_overall_statistics
 
-# Set up logging
 logger = logging.getLogger(__name__)
+router = APIRouter()
 
-# Initialize router with prefix
-router = APIRouter(prefix="/api")
-
-# Initialize database connection
-settings = get_settings()
-client = AsyncIOMotorClient(settings.mongodb_url)
-db = client[settings.database_name]
-
-@router.get("/stats")  # Changed from "/api/stats"
-async def get_overall_stats(current_user: User = Depends(get_current_user)):
-    """Get overall statistics for the dashboard."""
+@router.get("/overview")
+async def get_overall_statistics(
+    current_user: User = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """
+    Retrieve comprehensive network-wide statistics.
+    
+    This endpoint aggregates data across all ATS centers to provide high-level
+    insights into the network's performance, including testing volumes, vehicle
+    categories, and operational metrics. The statistics help in strategic
+    decision-making and performance monitoring.
+    """
     try:
-        pipeline = [
-            {
-                "$group": {
-                    "_id": None,
-                    "totalVehicles": {"$sum": "$total_vehicles"},
-                    "atsCenters": {"$sum": "$ats_centers"},
-                    "vehiclesUnder8": {"$sum": "$vehicles_under_8"},
-                    "vehiclesOver8": {"$sum": "$vehicles_over_8"}
-                }
-            },
-            {
-                "$project": {
-                    "_id": 0,
-                    "totalVehicles": 1,
-                    "atsCenters": 1,
-                    "vehiclesUnder8": 1,
-                    "vehiclesOver8": 1
-                }
-            }
-        ]
+        logger.info("Retrieving network-wide statistics")
+        stats = await get_overall_stats()
         
-        result = await db.ats_stats.aggregate(pipeline).to_list(None)
-        if not result:
-            return {
-                "totalVehicles": 0,
-                "atsCenters": 0,
-                "vehiclesUnder8": 0,
-                "vehiclesOver8": 0
+        return {
+            "summary": {
+                "total_vehicles": stats.get("total_vehicles", 0),
+                "ats_centers": stats.get("ats_centers", 0),
+                "vehicles_under_8": stats.get("vehicles_under_8", 0),
+                "vehicles_over_8": stats.get("vehicles_over_8", 0)
+            },
+            "performance_metrics": {
+                "average_processing_time": stats.get("avg_processing_time"),
+                "network_utilization": stats.get("network_utilization"),
+                "efficiency_score": stats.get("efficiency_score")
+            },
+            "compliance_metrics": {
+                "compliance_rate": stats.get("compliance_rate"),
+                "certification_status": stats.get("certification_status")
             }
-            
-        return result[0]
+        }
+
     except Exception as e:
-        logger.error(f"Error fetching statistics: {str(e)}")
+        logger.error(f"Error retrieving overall statistics: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to fetch statistics"
+            detail="Failed to retrieve statistics"
+        )
+
+
+@router.get("", response_model=Dict[str, Any])
+async def get_stats(current_user: User = Depends(get_current_user)):
+    """Get system statistics."""
+    try:
+        # Return sample data for now
+        return {
+            "totalVehicles": 150,
+            "atsCenters": 5,
+            "vehiclesUnder8": 90,
+            "vehiclesOver8": 60
+        }
+    except Exception as e:
+        logger.error(f"Error retrieving stats: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve statistics"
         )

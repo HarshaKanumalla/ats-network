@@ -1,4 +1,40 @@
-# backend/app/models/__init__.py
-from .user import UserBase, UserCreate, UserInDB, User, UserUpdate
+"""Data models module initialization."""
+from .user import (
+    User,
+    UserBase,
+    UserCreate,
+    UserInDB,
+    UserUpdate,
+    UserResponse,
+    AdminUserUpdate,
+    TokenData,
+    Token,
+    Role,
+    UserStatus
+)
+from .location import (
+    Location,
+    LocationBase,
+    LocationCreate,
+    LocationResponse
+)
 
-# This file enables importing directly from models
+__all__ = [
+    # User models
+    'User',
+    'UserBase',
+    'UserCreate',
+    'UserInDB',
+    'UserUpdate',
+    'UserResponse',
+    'AdminUserUpdate',
+    'TokenData',
+    'Token',
+    'Role',
+    'UserStatus',
+    # Location models
+    'Location',
+    'LocationBase',
+    'LocationCreate',
+    'LocationResponse'
+]

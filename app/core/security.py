@@ -1,27 +1,51 @@
-# backend/app/core/security.py
-
+"""Core security functionality."""
 from passlib.context import CryptContext
-from typing import Optional
 import secrets
 from datetime import datetime, timedelta
+import logging
+from typing import Tuple
 
-# Password hashing configuration
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+logger = logging.getLogger(__name__)
 
-def get_password_hash(password: str) -> str:
-    """Generate a secure hash from a password."""
-    return pwd_context.hash(password)
+class SecurityManager:
+    """Handles security-related operations."""
+    
+    _pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash."""
-    return pwd_context.verify(plain_password, hashed_password)
+    @classmethod
+    def get_password_hash(cls, password: str) -> str:
+        """Generate a secure hash from a password."""
+        try:
+            return cls._pwd_context.hash(password)
+        except Exception as e:
+            logger.error(f"Password hashing failed: {str(e)}")
+            raise
 
-def create_verification_token() -> str:
-    """Generate a secure token for email verification."""
-    return secrets.token_urlsafe(32)
+    @classmethod
+    def verify_password(cls, plain_password: str, hashed_password: str) -> bool:
+        """Verify a password against its hash."""
+        try:
+            return cls._pwd_context.verify(plain_password, hashed_password)
+        except Exception as e:
+            logger.error(f"Password verification failed: {str(e)}")
+            return False
 
-def create_reset_token() -> tuple[str, datetime]:
-    """Create a password reset token with expiration."""
-    expiration = datetime.utcnow() + timedelta(hours=24)
-    token = secrets.token_urlsafe(32)
-    return token, expiration
+    @staticmethod
+    def create_verification_token() -> str:
+        """Generate a secure token for email verification."""
+        try:
+            return secrets.token_urlsafe(32)
+        except Exception as e:
+            logger.error(f"Verification token creation failed: {str(e)}")
+            raise
+
+    @staticmethod
+    def create_reset_token() -> Tuple[str, datetime]:
+        """Create a password reset token with expiration."""
+        try:
+            expiration = datetime.utcnow() + timedelta(hours=24)
+            token = secrets.token_urlsafe(32)
+            return token, expiration
+        except Exception as e:
+            logger.error(f"Reset token creation failed: {str(e)}")
+            raise

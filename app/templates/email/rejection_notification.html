@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Registration Status Update</title>
+</head>
+<body>
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2>Registration Status Update</h2>
+        <p>Dear {{ user_name }},</p>
+        <p>We have reviewed your registration for ATS Network. Unfortunately, we cannot approve your registration at this time.</p>
+        {% if reason %}
+        <p>Reason: {{ reason }}</p>
+        {% endif %}
+        <p>If you believe this decision was made in error or if you would like to provide additional information, please contact our support team.</p>
+        <p>Best regards,<br>ATS Network Team</p>
+    </div>
+</body>
+</html>

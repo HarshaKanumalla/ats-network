@@ -1,235 +1,163 @@
-# backend/app/services/email.py
+"""Email service for managing all application email communications."""
+
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
 from fastapi import HTTPException
 import logging
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+from jinja2 import Environment, PackageLoader, select_autoescape
+import aiosmtplib
+
 from ..config import get_settings
 from ..models.user import User, UserStatus
 
-# Set up logging
 logger = logging.getLogger(__name__)
-
-# Get settings
 settings = get_settings()
 
-# System Info
-SYSTEM_INFO = {
-    "last_updated": "2024-12-19 18:16:02",
-    "updated_by": "HarshaKanumalla"
-}
+class EmailService:
+    """Manages email operations and template rendering."""
 
-# Email configuration
-email_config = ConnectionConfig(
-    MAIL_USERNAME=settings.mail_username,
-    MAIL_PASSWORD=settings.mail_password,
-    MAIL_FROM=settings.mail_from,
-    MAIL_PORT=settings.mail_port,
-    MAIL_SERVER=settings.mail_server,
-    MAIL_FROM_NAME="ATS Network",
-    MAIL_STARTTLS=True,
-    MAIL_SSL_TLS=False,
-    USE_CREDENTIALS=True,
-    VALIDATE_CERTS=True
-)
-
-# Create FastMail instance
-fastmail = FastMail(email_config)
-
-async def send_email(
-    recipients: List[str],
-    subject: str,
-    body: str,
-    subtype: str = "html"
-) -> bool:
-    """Generic function to send email."""
-    try:
-        message = MessageSchema(
-            subject=subject,
-            recipients=recipients,
-            body=body,
-            subtype=subtype
+    def __init__(self):
+        """Initialize email service with required configurations."""
+        self.email_config = ConnectionConfig(
+            MAIL_USERNAME=settings.mail_username,
+            MAIL_PASSWORD=settings.mail_password,
+            MAIL_FROM=settings.mail_from,
+            MAIL_PORT=settings.mail_port,
+            MAIL_SERVER=settings.mail_server,
+            MAIL_FROM_NAME="ATS Network",
+            MAIL_STARTTLS=True,
+            MAIL_SSL_TLS=False,
+            USE_CREDENTIALS=True,
+            VALIDATE_CERTS=True
         )
-        await fastmail.send_message(message)
-        logger.info(f"Email sent successfully to {recipients}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to send email to {recipients}: {str(e)}")
-        return False
 
-async def send_verification_email(email: str, token: str) -> bool:
-    """Send verification email to user."""
-    try:
-        verification_link = f"{settings.frontend_url}/verify-email?token={token}"
-        html_content = f"""
-        <html>
-            <body style="font-family: Arial, sans-serif;">
-                <h2>Verify Your ATS Network Account</h2>
-                <p>Please click the following link to verify your email:</p>
-                <p><a href="{verification_link}">{verification_link}</a></p>
-                <p>This link will expire in 24 hours.</p>
-                <p>If you did not create this account, please ignore this email.</p>
-                <p>Best regards,<br>ATS Network Team</p>
-            </body>
-        </html>
+        self.template_env = Environment(
+            loader=PackageLoader('app', 'templates/email'),
+            autoescape=select_autoescape(['html', 'xml'])
+        )
+        
+        self.fastmail = FastMail(self.email_config)
+        logger.info("Email service initialized successfully")
+
+    async def send_email(
+        self,
+        recipients: List[str],
+        subject: str,
+        template_name: str,
+        template_data: Dict[str, Any]
+    ) -> bool:
+        """Send an email using a template.
+
+        Args:
+            recipients: List of email addresses to send to
+            subject: Email subject line
+            template_name: Name of the template to use
+            template_data: Data to populate the template
+
+        Returns:
+            Boolean indicating successful delivery
         """
-        return await send_email(
-            recipients=[email],
-            subject="Verify Your ATS Network Account",
-            body=html_content
-        )
-    except Exception as e:
-        logger.error(f"Error sending verification email: {str(e)}")
-        return False
+        try:
+            template = self.template_env.get_template(f"{template_name}.html")
+            html_content = template.render(**template_data)
 
-async def send_admin_notification(user_data: Dict[str, Any]) -> bool:
-    """Send notification to admin about new registration."""
-    try:
-        action_link = f"{settings.frontend_url}/admin/users/{user_data.get('id', '')}"
-        html_content = f"""
-        <html>
-            <body style="font-family: Arial, sans-serif;">
-                <h2>New User Registration</h2>
-                <p>A new user has registered with the following details:</p>
-                <table style="border-collapse: collapse; width: 100%;">
-                    <tr>
-                        <td style="padding: 8px; border: 1px solid #ddd;"><strong>Name</strong></td>
-                        <td style="padding: 8px; border: 1px solid #ddd;">{user_data.get('full_name', 'N/A')}</td>
-                    </tr>
-                    <tr>
-                        <td style="padding: 8px; border: 1px solid #ddd;"><strong>Email</strong></td>
-                        <td style="padding: 8px; border: 1px solid #ddd;">{user_data.get('email', 'N/A')}</td>
-                    </tr>
-                    <tr>
-                        <td style="padding: 8px; border: 1px solid #ddd;"><strong>ATS Address</strong></td>
-                        <td style="padding: 8px; border: 1px solid #ddd;">{user_data.get('ats_address', 'N/A')}</td>
-                    </tr>
-                    <tr>
-                        <td style="padding: 8px; border: 1px solid #ddd;"><strong>City</strong></td>
-                        <td style="padding: 8px; border: 1px solid #ddd;">{user_data.get('city', 'N/A')}</td>
-                    </tr>
-                    <tr>
-                        <td style="padding: 8px; border: 1px solid #ddd;"><strong>District</strong></td>
-                        <td style="padding: 8px; border: 1px solid #ddd;">{user_data.get('district', 'N/A')}</td>
-                    </tr>
-                    <tr>
-                        <td style="padding: 8px; border: 1px solid #ddd;"><strong>State</strong></td>
-                        <td style="padding: 8px; border: 1px solid #ddd;">{user_data.get('state', 'N/A')}</td>
-                    </tr>
-                    <tr>
-                        <td style="padding: 8px; border: 1px solid #ddd;"><strong>PIN Code</strong></td>
-                        <td style="padding: 8px; border: 1px solid #ddd;">{user_data.get('pin_code', 'N/A')}</td>
-                    </tr>
-                </table>
-                <p>Please review and take action on this registration:</p>
-                <p><a href="{action_link}">Review Registration</a></p>
-                <p>Timestamp: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}</p>
-            </body>
-        </html>
-        """
-        return await send_email(
-            recipients=[settings.admin_email],
-            subject="New User Registration - ATS Network",
-            body=html_content
-        )
-    except Exception as e:
-        logger.error(f"Error sending admin notification: {str(e)}")
-        return False
+            message = MessageSchema(
+                subject=subject,
+                recipients=recipients,
+                body=html_content,
+                subtype="html"
+            )
 
-async def send_registration_confirmation(user_data: Dict[str, Any]) -> bool:
-    """Send registration confirmation to user."""
-    try:
-        html_content = f"""
-        <html>
-            <body style="font-family: Arial, sans-serif;">
-                <h2>Welcome to ATS Network</h2>
-                <p>Dear {user_data.get('full_name', '')},</p>
-                <p>Thank you for registering with ATS Network. Your registration is being reviewed by our admin team.</p>
-                <p>Registration Details:</p>
-                <ul>
-                    <li>Email: {user_data.get('email')}</li>
-                    <li>ATS Address: {user_data.get('ats_address')}</li>
-                    <li>City: {user_data.get('city')}</li>
-                    <li>Status: Pending Review</li>
-                </ul>
-                <p>You will receive another email once your registration is approved.</p>
-                <p>Best regards,<br>ATS Network Team</p>
-            </body>
-        </html>
-        """
-        return await send_email(
-            recipients=[user_data['email']],
-            subject="Welcome to ATS Network",
-            body=html_content
-        )
-    except Exception as e:
-        logger.error(f"Error sending registration confirmation: {str(e)}")
-        return False
+            await self.fastmail.send_message(message)
+            logger.info(f"Email sent successfully to {recipients}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error sending email: {str(e)}")
+            return False
+
+# Initialize email service instance
+email_service = EmailService()
 
 async def send_approval_email(user: User) -> bool:
-    """Send approval email to user."""
+    """Send an approval notification email to a user.
+
+    Args:
+        user: The user whose registration has been approved
+
+    Returns:
+        Boolean indicating whether the email was sent successfully
+    """
     try:
-        login_link = f"{settings.frontend_url}/login"
-        html_content = f"""
-        <html>
-            <body style="font-family: Arial, sans-serif;">
-                <h2>ATS Network Registration Approved</h2>
-                <p>Dear {user.full_name},</p>
-                <p>Congratulations! Your registration for ATS Network has been approved.</p>
-                <p>You can now <a href="{login_link}">log in to your account</a> using your registered email and password.</p>
-                <p>Account Details:</p>
-                <ul>
-                    <li>Email: {user.email}</li>
-                    <li>ATS Address: {user.ats_address}</li>
-                    <li>Status: Approved</li>
-                </ul>
-                <p>If you have any questions or need assistance, please don't hesitate to contact our support team.</p>
-                <p>Best regards,<br>ATS Network Team</p>
-            </body>
-        </html>
-        """
-        return await send_email(
+        template_data = {
+            "user_name": user.full_name,
+            "login_link": f"{settings.frontend_url}/login"
+        }
+
+        return await email_service.send_email(
             recipients=[user.email],
             subject="ATS Network Registration Approved",
-            body=html_content
+            template_name="approval_notification",
+            template_data=template_data
         )
+
     except Exception as e:
-        logger.error(f"Error sending approval email: {str(e)}")
+        logger.error(f"Error sending approval email to {user.email}: {str(e)}")
         return False
 
-async def send_rejection_email(user: User, reason: str) -> bool:
-    """Send rejection email to user."""
+async def send_rejection_email(user: User, reason: Optional[str] = None) -> bool:
+    """Send a rejection notification email to a user.
+
+    Args:
+        user: The user whose registration has been rejected
+        reason: Optional reason for the rejection
+
+    Returns:
+        Boolean indicating whether the email was sent successfully
+    """
     try:
-        support_email = settings.support_email or settings.admin_email
-        html_content = f"""
-        <html>
-            <body style="font-family: Arial, sans-serif;">
-                <h2>ATS Network Registration Status</h2>
-                <p>Dear {user.full_name},</p>
-                <p>We regret to inform you that your registration for ATS Network could not be approved at this time.</p>
-                <p><strong>Reason:</strong> {reason}</p>
-                <p>If you believe this is an error or would like to provide additional information, 
-                   please contact our support team at <a href="mailto:{support_email}">{support_email}</a>.</p>
-                <p>You may submit a new registration after addressing the concerns mentioned above.</p>
-                <p>Best regards,<br>ATS Network Team</p>
-            </body>
-        </html>
-        """
-        return await send_email(
+        template_data = {
+            "user_name": user.full_name,
+            "reason": reason
+        }
+
+        return await email_service.send_email(
             recipients=[user.email],
-            subject="ATS Network Registration Status",
-            body=html_content
+            subject="ATS Network Registration Status Update",
+            template_name="rejection_notification",
+            template_data=template_data
         )
+
     except Exception as e:
-        logger.error(f"Error sending rejection email: {str(e)}")
+        logger.error(f"Error sending rejection email to {user.email}: {str(e)}")
         return False
 
-# Export all email functions
-__all__ = [
-    'send_email',
-    'send_verification_email',
-    'send_admin_notification',
-    'send_registration_confirmation',
-    'send_approval_email',
-    'send_rejection_email'
-]
+async def send_verification_email(user: User, verification_token: str) -> bool:
+    """Send an email verification link to a newly registered user.
+
+    Args:
+        user: The newly registered user
+        verification_token: The token for email verification
+
+    Returns:
+        Boolean indicating whether the email was sent successfully
+    """
+    try:
+        verification_link = f"{settings.frontend_url}/verify-email?token={verification_token}"
+        template_data = {
+            "user_name": user.full_name,
+            "verification_link": verification_link,
+            "expiry_hours": 24
+        }
+
+        return await email_service.send_email(
+            recipients=[user.email],
+            subject="Verify Your ATS Network Email",
+            template_name="email_verification",
+            template_data=template_data
+        )
+
+    except Exception as e:
+        logger.error(f"Error sending verification email to {user.email}: {str(e)}")
+        return False
