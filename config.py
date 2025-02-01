@@ -1,88 +1,78 @@
+# backend/config.py
+
 from pydantic_settings import BaseSettings
-from typing import List, Optional
+from typing import List
 from functools import lru_cache
-from datetime import timedelta
+import os
 
 class Settings(BaseSettings):
     # Application settings
-    environment: str = "development"
-    workers_count: int = 1
-    debug: bool = True
-    api_prefix: str = "/api/v1"
-
+    PROJECT_NAME: str = "ATS Network API"
+    VERSION: str = "1.0.0"
+    DEBUG: bool = False
+    API_PREFIX: str = "/api/v1"
+    
     # Security settings
-    access_token_secret: str
-    refresh_token_secret: str
-    token_algorithm: str = "HS256"
-    access_token_expire_minutes: int = 30
-    refresh_token_expire_days: int = 7
-
-    # Cookie settings
-    cookie_secure: bool = True
-    cookie_domain: str = "localhost"
-    cookie_samesite: str = "lax"
-
+    ACCESS_TOKEN_SECRET: str
+    REFRESH_TOKEN_SECRET: str
+    TOKEN_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15  # Short-lived token
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7    # Long-lived token
+    ADMIN_EMAIL: str = "atsnetwork15@gmail.com"
+    ADMIN_PASSWORD: str = "Admin@123"
+    
+    # JWT Settings
+    JWT_PUBLIC_KEY: str
+    JWT_PRIVATE_KEY: str
+    REFRESH_TOKEN_COOKIE_NAME: str = "refreshToken"
+    
+    # CORS settings
+    CORS_ORIGINS: List[str] = ["http://localhost:3000"]
+    CORS_CREDENTIALS: bool = True
+    
     # Database settings
-    mongodb_url: str
-    database_name: str = "ats_network"
-
-    # Redis settings
-    redis_host: str = "localhost"
-    redis_port: int = 6379
-    redis_db: int = 0
-    redis_password: Optional[str] = None
-
+    MONGODB_URL: str
+    MONGODB_DB_NAME: str = "ats_network"
+    
+    # AWS settings
+    AWS_ACCESS_KEY_ID: str
+    AWS_SECRET_ACCESS_KEY: str
+    AWS_REGION: str
+    S3_BUCKET_NAME: str
+    
     # Email settings
-    mail_username: str
-    mail_password: str
-    mail_from: str
-    mail_port: int = 587
-    mail_server: str = "smtp.gmail.com"
-    mail_tls: bool = True
-    mail_ssl: bool = False
-    admin_email: str
-    support_email: str = ""
-
-    # Frontend settings
-    frontend_url: str = "http://localhost:3000"
-    allowed_origins: List[str] = ["http://localhost:3000"]
-
-    # File upload settings
-    upload_folder: str = "uploads"
-    max_upload_size: int = 5 * 1024 * 1024  # 5MB
-    allowed_extensions: List[str] = ["pdf", "doc", "docx"]
-
-    model_config = {
-        "env_file": ".env",
-        "env_file_encoding": "utf-8",
-        "case_sensitive": False,
-        "env_prefix": "",
-        "use_enum_values": True,
-        "extra": "allow",
-        "env_nested_delimiter": "__",
-        "validate_default": True,
-        "protected_namespaces": ("model_", "validate_", "json_", "parse_"),
-        "alias_generator": None,
-        "str_strip_whitespace": True,
-        "env_vars_override": True,
-        "env_mapping": {
-            "access_token_secret": ["ACCESS_TOKEN_SECRET", "JWT_SECRET"],
-            "refresh_token_secret": ["REFRESH_TOKEN_SECRET", "SECRET_KEY"],
-            "token_algorithm": ["TOKEN_ALGORITHM", "JWT_ALGORITHM"],
-            "access_token_expire_minutes": ["ACCESS_TOKEN_EXPIRE_MINUTES", "JWT_EXPIRATION"],
-            "mongodb_url": ["MONGODB_URL", "DATABASE_URL"]
-        }
+    SMTP_SERVER: str
+    SMTP_PORT: int
+    SMTP_USERNAME: str
+    SMTP_PASSWORD: str
+    MAIL_FROM: str
+    MAIL_FROM_NAME: str
+    
+    # WebSocket settings
+    WS_URL: str = "ws://localhost:8000/ws"
+    
+    # Redis settings (for session and token management)
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = 6379
+    REDIS_PASSWORD: str
+    REDIS_DB: int = 0
+    
+    # Role-based access settings
+    ROLE_HIERARCHY = {
+        "transport_commissioner": ["all"],
+        "additional_commissioner": ["all"],
+        "super_admin": ["all"],
+        "rto_officer": ["approve_tests", "view_all_centers", "view_all_reports"],
+        "ats_owner": ["manage_center", "view_center_reports", "manage_staff"],
+        "ats_admin": ["manage_tests", "view_center_reports"],
+        "ats_testing": ["conduct_tests", "view_test_reports"]
     }
 
-    @property
-    def access_token_expires(self) -> timedelta:
-        return timedelta(minutes=self.access_token_expire_minutes)
-
-    @property
-    def refresh_token_expires(self) -> timedelta:
-        return timedelta(days=self.refresh_token_expire_days)
+    class Config:
+        env_file = ".env"
+        case_sensitive = True
 
 @lru_cache()
 def get_settings() -> Settings:
-    """Get cached settings instance."""
+    """Cached settings instance."""
     return Settings()
