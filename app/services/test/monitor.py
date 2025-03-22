@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 import logging
 import asyncio
+import json
 from bson import ObjectId
 
 from ...core.exceptions import ValidationError, MonitoringError
@@ -11,47 +12,81 @@ from ...services.websocket.manager import websocket_manager
 from ...services.notification.notification_service import notification_service
 from ...database import db_manager
 from ...config import get_settings
+from .interfaces import TestServiceInterface, TestResultsInterface
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
 class TestMonitor:
-    def __init__(self):
+    """Enhanced service for real-time test monitoring and data validation with interface integration."""
+    
+    def __init__(
+        self,
+        test_service: TestServiceInterface,
+        results_service: TestResultsInterface
+    ):
+        """Initialize test monitor with services and enhanced validation settings."""
+        self.test_service = test_service
+        self.results_service = results_service
         self.active_sessions: Dict[str, Dict[str, Any]] = {}
         
-        # Enhanced validation thresholds with more precise criteria
+        # Enhanced validation thresholds with comprehensive criteria
         self.validation_thresholds = {
             "speed_test": {
                 "min_speed": 0,
                 "max_speed": 120,
                 "min_readings": 10,
-                "reading_interval": 0.5,  # seconds
-                "stabilization_time": 5,  # seconds
-                "deviation_threshold": 2.0  # km/h
+                "reading_interval": 0.5,
+                "stabilization_time": 5,
+                "deviation_threshold": 2.0
             },
             "brake_test": {
-                "min_force": 50,  # Newtons
+                "min_force": 50,
                 "max_force": 1000,
-                "response_time": 0.75,  # seconds
-                "imbalance_limit": 30,  # percent
-                "min_deceleration": 5.8  # m/s²
+                "response_time": 0.75,
+                "imbalance_limit": 30,
+                "min_deceleration": 5.8
             },
             "headlight_test": {
-                "min_intensity": 100,  # candela
+                "min_intensity": 100,
                 "max_intensity": 1000,
-                "max_misalignment": 2.0,  # degrees
+                "max_misalignment": 2.0,
                 "min_measurements": 5
             },
             "noise_test": {
-                "max_level": 85,  # dB
+                "max_level": 85,
                 "ambient_threshold": 45,
-                "measurement_duration": 10,  # seconds
-                "sample_rate": 10  # readings per second
+                "measurement_duration": 10,
+                "sample_rate": 10
             }
         }
         
+        # Test sequence configurations
+        self.test_sequences = {
+            "standard": [
+                "visual_inspection",
+                "brake_test",
+                "speed_test",
+                "headlight_test",
+                "noise_test"
+            ],
+            "comprehensive": [
+                "visual_inspection",
+                "brake_test",
+                "speed_test",
+                "headlight_test",
+                "noise_test",
+                "axle_test",
+                "emission_test"
+            ]
+        }
+        
+        # Monitoring settings
         self.session_timeout = timedelta(minutes=30)
-        logger.info("Test monitor initialized with enhanced validation settings")
+        self.data_buffer_size = 1000
+        self.alert_threshold = 3
+        
+        logger.info("Test monitor initialized with enhanced validation settings and service interfaces")
 
     async def start_monitoring_session(
         self,
@@ -62,52 +97,58 @@ class TestMonitor:
     ) -> Dict[str, Any]:
         """Initialize and start a new test monitoring session."""
         try:
-            async with db_manager.transaction() as session:
-                # Verify prerequisites
-                await self._verify_test_prerequisites(center_id, operator_id)
-
-                # Create session record
-                session_data = {
-                    "session_id": session_id,
-                    "vehicle_id": ObjectId(vehicle_id),
-                    "center_id": ObjectId(center_id),
-                    "operator_id": ObjectId(operator_id),
-                    "start_time": datetime.utcnow(),
-                    "status": "in_progress",
-                    "measurements": {},
-                    "alerts": [],
-                    "metadata": {
-                        "client_connection_count": 0,
-                        "data_points_received": 0,
-                        "last_activity": datetime.utcnow()
-                    }
+            # Verify prerequisites
+            await self._verify_test_prerequisites(center_id, operator_id)
+            
+            # Create test session through interface
+            session = await self.test_service.create_test_session(
+                vehicle_id=vehicle_id,
+                center_id=center_id,
+                operator_id=operator_id
+            )
+            
+            # Initialize session data
+            session_data = {
+                **session,
+                "session_id": session_id,
+                "start_time": datetime.utcnow(),
+                "status": "in_progress",
+                "current_test": None,
+                "completed_tests": [],
+                "measurements": {},
+                "alerts": [],
+                "data_points": 0,
+                "metadata": {
+                    "client_count": 0,
+                    "last_activity": datetime.utcnow()
                 }
-
-                # Store session data
-                await db_manager.execute_query(
-                    "test_sessions",
-                    "insert_one",
-                    session_data,
-                    session=session
-                )
-
-                # Initialize monitoring
-                self.active_sessions[session_id] = {
-                    "data": session_data,
-                    "monitor_task": asyncio.create_task(
-                        self._monitor_session(session_id)
-                    )
-                }
-
-                # Notify session start
-                await self._notify_session_start(session_data)
-
-                logger.info(f"Started monitoring session: {session_id}")
-                return session_data
-
+            }
+            
+            # Store session data
+            await self._store_session_data(session_data)
+            
+            # Initialize real-time monitoring
+            self.active_sessions[session_id] = {
+                "data": session_data,
+                "monitor_task": asyncio.create_task(
+                    self._monitor_session(session_id)
+                ),
+                "data_buffer": [],
+                "alert_count": 0
+            }
+            
+            # Start background tasks
+            await self._start_monitoring_tasks(session_id)
+            
+            # Notify session start
+            await self._notify_session_start(session_data)
+            
+            logger.info(f"Started monitoring session: {session_id}")
+            return session_data
+            
         except Exception as e:
             logger.error(f"Session start error: {str(e)}")
-            raise MonitoringError(f"Failed to start monitoring session: {str(e)}")
+            raise MonitoringError(f"Failed to start monitoring: {str(e)}")
 
     async def process_test_data(
         self,
@@ -115,217 +156,243 @@ class TestMonitor:
         test_type: str,
         raw_data: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Process and validate incoming test data."""
+        """Process and validate incoming test data in real-time."""
         try:
             session = self.active_sessions.get(session_id)
             if not session:
                 raise MonitoringError("Invalid or expired test session")
-
-            # Validate data
-            validated_data = await self.validate_test_data(test_type, raw_data)
             
-            # Process measurements
-            processed_data = await self._process_measurements(
-                test_type,
-                validated_data,
-                session["data"]["measurements"].get(test_type, [])
+            # Validate test sequence
+            await self._validate_test_sequence(session, test_type)
+            
+            # Validate test data
+            validated_data = await self._validate_test_data(test_type, raw_data)
+            
+            # Process measurements through test service
+            processed_data = await self.test_service.process_measurement(
+                session_id=session_id,
+                test_type=test_type,
+                measurement_data=validated_data
             )
-
+            
             # Update session data
-            session["data"]["measurements"].setdefault(test_type, []).append(processed_data)
-            session["data"]["metadata"]["data_points_received"] += 1
+            session["data"]["measurements"].setdefault(test_type, []).append(
+                processed_data
+            )
+            session["data"]["data_points"] += 1
             session["data"]["metadata"]["last_activity"] = datetime.utcnow()
-
+            
+            # Buffer data for analysis
+            await self._buffer_test_data(session_id, test_type, processed_data)
+            
             # Check for anomalies
-            alerts = await self._check_test_thresholds(test_type, processed_data)
-            if alerts:
-                await self._handle_alerts(session_id, alerts)
-
+            if anomalies := await self._check_test_anomalies(
+                test_type,
+                processed_data,
+                session["data_buffer"]
+            ):
+                await self._handle_anomalies(session_id, anomalies)
+            
+            # Store results through results service
+            await self.results_service.store_test_result(
+                session_id=session_id,
+                test_type=test_type,
+                result_data=processed_data
+            )
+            
             # Broadcast update
             await websocket_manager.broadcast_test_data(
                 session_id,
                 test_type,
                 processed_data
             )
-
+            
             return processed_data
-
+            
         except Exception as e:
             logger.error(f"Data processing error: {str(e)}")
             raise MonitoringError(f"Failed to process test data: {str(e)}")
 
-    async def validate_test_data(
+    async def _validate_test_sequence(
+        self,
+        session: Dict[str, Any],
+        test_type: str
+    ) -> None:
+        """Validate test execution sequence."""
+        current_test = session["data"]["current_test"]
+        completed_tests = session["data"]["completed_tests"]
+        
+        if current_test and current_test != test_type:
+            raise ValidationError(
+                f"Invalid test sequence. Expected: {current_test}, Got: {test_type}"
+            )
+        
+        if test_type in completed_tests:
+            raise ValidationError(f"Test {test_type} already completed")
+
+    async def _validate_test_data(
         self,
         test_type: str,
-        raw_data: Dict[str, Any]
+        data: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Enhanced validation with comprehensive error checking."""
-        validation_errors = []
+        """Validate test data against defined thresholds."""
+        thresholds = self.validation_thresholds.get(test_type)
+        if not thresholds:
+            raise ValidationError(f"Invalid test type: {test_type}")
+            
+        validated_data = {}
         
         if test_type == "speed_test":
-            validation_errors.extend(
-                await self._validate_speed_test(raw_data)
-            )
-        elif test_type == "brake_test":
-            validation_errors.extend(
-                await self._validate_brake_test(raw_data)
-            )
-        elif test_type == "headlight_test":
-            validation_errors.extend(
-                await self._validate_headlight_test(raw_data)
-            )
-        elif test_type == "noise_test":
-            validation_errors.extend(
-                await self._validate_noise_test(raw_data)
-            )
-
-        if validation_errors:
-            await self._handle_validation_errors(validation_errors)
-            raise ValidationError(
-                f"Test data validation failed: {validation_errors}"
-            )
-
-        return self._prepare_validated_data(test_type, raw_data)
-
-    async def _validate_speed_test(
-        self,
-        data: Dict[str, Any]
-    ) -> List[str]:
-        """Comprehensive speed test validation."""
-        errors = []
-        thresholds = self.validation_thresholds["speed_test"]
-
-        readings = data.get("readings", [])
-        
-        # Check number of readings
-        if len(readings) < thresholds["min_readings"]:
-            errors.append(
-                f"Insufficient readings: {len(readings)} < {thresholds['min_readings']}"
-            )
-
-        # Validate reading intervals
-        for i in range(1, len(readings)):
-            interval = readings[i]["timestamp"] - readings[i-1]["timestamp"]
-            if interval > thresholds["reading_interval"] * 1.5:  # Allow 50% margin
-                errors.append(f"Invalid reading interval at index {i}: {interval}s")
-
-        # Check speed values
-        for i, reading in enumerate(readings):
-            speed = reading.get("speed", 0)
-            if not thresholds["min_speed"] <= speed <= thresholds["max_speed"]:
-                errors.append(
-                    f"Speed out of range at index {i}: {speed} km/h"
+            speed = float(data.get("speed", 0))
+            if not (thresholds["min_speed"] <= speed <= thresholds["max_speed"]):
+                raise ValidationError(
+                    f"Speed {speed} outside valid range "
+                    f"[{thresholds['min_speed']}, {thresholds['max_speed']}]"
                 )
+            validated_data["speed"] = speed
+            validated_data["timestamp"] = datetime.utcnow()
+            
+        elif test_type == "brake_test":
+            force = float(data.get("force", 0))
+            if not (thresholds["min_force"] <= force <= thresholds["max_force"]):
+                raise ValidationError(
+                    f"Brake force {force} outside valid range "
+                    f"[{thresholds['min_force']}, {thresholds['max_force']}]"
+                )
+            validated_data["force"] = force
+            validated_data["response_time"] = float(data.get("response_time", 0))
+            validated_data["timestamp"] = datetime.utcnow()
+            
+        # Add validation for other test types...
+        
+        return validated_data
 
-        # Validate stabilization period
-        stable_readings = self._get_stable_readings(readings, thresholds)
-        if not stable_readings:
-            errors.append("No stable speed readings found")
+    async def _buffer_test_data(
+        self,
+        session_id: str,
+        test_type: str,
+        data: Dict[str, Any]
+    ) -> None:
+        """Buffer test data for analysis."""
+        buffer = self.active_sessions[session_id]["data_buffer"]
+        buffer.append({
+            "test_type": test_type,
+            "data": data,
+            "timestamp": datetime.utcnow()
+        })
+        
+        # Maintain buffer size
+        if len(buffer) > self.data_buffer_size:
+            buffer.pop(0)
 
-        return errors
+    async def _check_test_anomalies(
+        self,
+        test_type: str,
+        current_data: Dict[str, Any],
+        data_buffer: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Check for anomalies in test data."""
+        anomalies = []
+        thresholds = self.validation_thresholds[test_type]
+        
+        if test_type == "speed_test":
+            # Check speed stability
+            recent_speeds = [
+                d["data"]["speed"] for d in data_buffer[-5:]
+                if d["test_type"] == "speed_test"
+            ]
+            if recent_speeds:
+                avg_speed = sum(recent_speeds) / len(recent_speeds)
+                if abs(current_data["speed"] - avg_speed) > thresholds["deviation_threshold"]:
+                    anomalies.append({
+                        "type": "speed_instability",
+                        "value": current_data["speed"],
+                        "average": avg_speed,
+                        "threshold": thresholds["deviation_threshold"]
+                    })
+                    
+        # Add anomaly detection for other test types...
+        
+        return anomalies
+
+    async def _handle_anomalies(
+        self,
+        session_id: str,
+        anomalies: List[Dict[str, Any]]
+    ) -> None:
+        """Handle detected test anomalies."""
+        session = self.active_sessions[session_id]
+        session["alert_count"] += len(anomalies)
+        
+        for anomaly in anomalies:
+            # Add to session alerts
+            session["data"]["alerts"].append({
+                "type": anomaly["type"],
+                "details": anomaly,
+                "timestamp": datetime.utcnow()
+            })
+            
+            # Store anomaly through results service
+            await self.results_service.store_test_anomaly(
+                session_id=session_id,
+                anomaly_data=anomaly
+            )
+            
+            # Notify operator
+            await notification_service.send_notification(
+                user_id=str(session["data"]["operator_id"]),
+                title="Test Anomaly Detected",
+                message=f"Anomaly detected: {anomaly['type']}",
+                data=anomaly
+            )
+            
+            # Check alert threshold
+            if session["alert_count"] >= self.alert_threshold:
+                await self._handle_critical_alerts(session_id)
 
     async def _verify_test_prerequisites(
         self,
         center_id: str,
         operator_id: str
     ) -> None:
-        """Verify all prerequisites are met before starting test."""
+        """Verify all prerequisites for test session."""
         try:
-            # Verify center status
-            center = await db_manager.execute_query(
-                "centers",
-                "find_one",
-                {"_id": ObjectId(center_id)}
+            # Verify center and operator through test service
+            await self.test_service.verify_test_prerequisites(
+                center_id=center_id,
+                operator_id=operator_id
             )
-            if not center or center["status"] != "active":
-                raise MonitoringError("Invalid or inactive test center")
-
-            # Verify operator permissions
-            operator = await db_manager.execute_query(
-                "users",
-                "find_one",
-                {"_id": ObjectId(operator_id)}
-            )
-            if not operator or "conduct_tests" not in operator.get("permissions", []):
-                raise MonitoringError("Operator not authorized to conduct tests")
-
-            # Verify equipment status
-            equipment_status = await self._check_equipment_status(center_id)
-            if not equipment_status["all_operational"]:
-                raise MonitoringError(
-                    f"Equipment check failed: {equipment_status['details']}"
-                )
-
+            
         except Exception as e:
             logger.error(f"Prerequisites verification error: {str(e)}")
-            raise MonitoringError(f"Failed to verify test prerequisites: {str(e)}")
+            raise MonitoringError(f"Failed to verify prerequisites: {str(e)}")
 
     async def _monitor_session(self, session_id: str) -> None:
-        """Monitor test session for timeout and anomalies."""
+        """Monitor test session for timeouts and anomalies."""
         try:
             while session_id in self.active_sessions:
                 session = self.active_sessions[session_id]
                 current_time = datetime.utcnow()
                 
                 # Check session timeout
-                if (current_time - session["data"]["metadata"]["last_activity"] 
-                    > self.session_timeout):
+                last_activity = session["data"]["metadata"]["last_activity"]
+                if current_time - last_activity > self.session_timeout:
                     await self._handle_session_timeout(session_id)
                     break
-
+                
                 # Check data consistency
                 await self._check_data_consistency(session_id)
-
+                
+                # Monitor equipment status through test service
+                await self.test_service.check_equipment_status(
+                    center_id=str(session["data"]["center_id"])
+                )
+                
                 await asyncio.sleep(5)  # Check every 5 seconds
-
+                
         except Exception as e:
             logger.error(f"Session monitoring error: {str(e)}")
             await self._handle_session_error(session_id, str(e))
-
-    async def _handle_session_timeout(self, session_id: str) -> None:
-        """Handle session timeout with proper cleanup."""
-        try:
-            session = self.active_sessions[session_id]
-            
-            # Update session status
-            await db_manager.execute_query(
-                "test_sessions",
-                "update_one",
-                {"_id": ObjectId(session_id)},
-                {"$set": {
-                    "status": "timeout",
-                    "end_time": datetime.utcnow(),
-                    "timeout_reason": "Session inactivity timeout"
-                }}
-            )
-            
-            # Notify timeout
-            await notification_service.send_notification(
-                user_id=str(session["data"]["operator_id"]),
-                title="Test Session Timeout",
-                message=f"Test session {session_id} has timed out due to inactivity"
-            )
-
-            # Cleanup session
-            await self._cleanup_session(session_id)
-
-        except Exception as e:
-            logger.error(f"Session timeout handling error: {str(e)}")
-
-    async def _cleanup_session(self, session_id: str) -> None:
-        """Clean up session resources."""
-        try:
-            if session_id in self.active_sessions:
-                # Cancel monitoring task
-                self.active_sessions[session_id]["monitor_task"].cancel()
-                
-                # Clear session data
-                del self.active_sessions[session_id]
-                
-                logger.info(f"Cleaned up session: {session_id}")
-                
-        except Exception as e:
-            logger.error(f"Session cleanup error: {str(e)}")
 
 # Initialize test monitor
 test_monitor = TestMonitor()

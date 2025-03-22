@@ -1,8 +1,8 @@
 #backend/app/models/location.py
 
-"""Location and geographical data models."""
-from typing import Optional, List, Dict, Any, Tuple
-from pydantic import Field, field_validator
+"""Location and geographical data models with enhanced validation."""
+from typing import Optional, List, Dict, Any
+from pydantic import Field, validator, field_validator
 from datetime import datetime
 
 from .common import AuditedModel, PyObjectId
@@ -10,84 +10,80 @@ from ..config import get_settings
 
 settings = get_settings()
 
-class Coordinates(BaseModel):
-    """Geographic coordinates model."""
+class Coordinates(AuditedModel):
+    """Geographic coordinates model with validation."""
     
     latitude: float = Field(
         ...,
-        ge=-90,
-        le=90,
+        ge=settings.MAP_BOUNDS["south"],
+        le=settings.MAP_BOUNDS["north"],
         description="Latitude in decimal degrees"
     )
     longitude: float = Field(
         ...,
-        ge=-180,
-        le=180,
+        ge=settings.MAP_BOUNDS["west"],
+        le=settings.MAP_BOUNDS["east"],
         description="Longitude in decimal degrees"
+    )
+    accuracy: Optional[float] = Field(
+        default=None,
+        description="Accuracy of coordinates in meters"
     )
     
     @field_validator('latitude')
     def validate_latitude(cls, v: float) -> float:
         """Validate latitude is within India's bounds."""
         if not (settings.MAP_BOUNDS['south'] <= v <= settings.MAP_BOUNDS['north']):
-            raise ValueError('Latitude outside permitted bounds')
-        return v
+            raise ValueError('Latitude outside India\'s geographical bounds')
+        return round(v, 6)  # 6 decimal places for ~10cm precision
 
     @field_validator('longitude')
     def validate_longitude(cls, v: float) -> float:
         """Validate longitude is within India's bounds."""
         if not (settings.MAP_BOUNDS['west'] <= v <= settings.MAP_BOUNDS['east']):
-            raise ValueError('Longitude outside permitted bounds')
-        return v
+            raise ValueError('Longitude outside India\'s geographical bounds')
+        return round(v, 6)
 
-class Location(AuditedModel):
-    """Location model for ATS centers."""
+class Address(AuditedModel):
+    """Enhanced address model with validation."""
     
-    coordinates: Coordinates = Field(...)
-    address: str = Field(..., min_length=5, max_length=200)
+    street: str = Field(..., min_length=5, max_length=200)
+    area: Optional[str] = Field(default=None, max_length=100)
+    landmark: Optional[str] = Field(default=None, max_length=100)
     city: str = Field(..., min_length=2, max_length=100)
     district: str = Field(..., min_length=2, max_length=100)
     state: str = Field(..., min_length=2, max_length=100)
     pin_code: str = Field(..., pattern=r'^\d{6}$')
     
-    # Optional additional details
-    landmark: Optional[str] = None
-    area_name: Optional[str] = None
-    directions: Optional[str] = None
-    
-    # Computed fields
-    formatted_address: Optional[str] = None
-    place_id: Optional[str] = None
-
-class LocationCreate(Location):
-    """Model for creating a new location."""
-    
-    center_id: PyObjectId = Field(...)
-    
-    @field_validator('coordinates')
-    def validate_coordinates(cls, v: Coordinates) -> Coordinates:
-        """Additional validation for new locations."""
+    @field_validator('pin_code')
+    def validate_pin_code(cls, v: str) -> str:
+        """Validate PIN code format and existence."""
+        if not v.isdigit() or len(v) != 6:
+            raise ValueError("Invalid PIN code format")
+        # Additional PIN code validation could be added here
         return v
 
-class LocationUpdate(Location):
-    """Model for updating location information."""
+class Location(AuditedModel):
+    """Comprehensive location model with address and coordinates."""
     
-    coordinates: Optional[Coordinates] = None
-    address: Optional[str] = None
-    city: Optional[str] = None
-    district: Optional[str] = None
-    state: Optional[str] = None
-    pin_code: Optional[str] = None
-
-class LocationInDB(Location):
-    """Internal location model with additional fields."""
+    coordinates: Coordinates
+    address: Address
     
-    center_id: PyObjectId
-    geocoding_status: str = Field(default="pending")
-    last_verified: Optional[datetime] = None
+    # Additional location metadata
+    place_id: Optional[str] = None
+    formatted_address: Optional[str] = None
+    location_type: Optional[str] = Field(
+        default="business",
+        description="Type of location (business, residential, etc.)"
+    )
     
-    # Geocoding results
-    geocoding_results: Dict[str, Any] = Field(default_factory=dict)
+    # Verification status
+    verification_status: str = Field(
+        default="pending",
+        description="Location verification status"
+    )
+    verified_by: Optional[PyObjectId] = None
+    verified_at: Optional[datetime] = None
     
     # Additional metadata
     timezone: Optional[str] = None
@@ -99,34 +95,47 @@ class LocationInDB(Location):
             PyObjectId: str
         }
 
-class LocationResponse(Location):
-    """Location response model."""
+class LocationCreate(AuditedModel):
+    """Model for creating a new location record."""
+    
+    address: Address
+    coordinates: Optional[Coordinates] = None  # Optional as it might be geocoded later
+    center_id: Optional[PyObjectId] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+class LocationUpdate(AuditedModel):
+    """Model for updating location information."""
+    
+    address: Optional[Address] = None
+    coordinates: Optional[Coordinates] = None
+    verification_status: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+class LocationResponse(AuditedModel):
+    """Model for location API responses."""
     
     id: PyObjectId = Field(..., alias="_id")
-    center_id: PyObjectId
-    geocoding_status: str
+    location: Location
+    center_id: Optional[PyObjectId] = None
+    distance: Optional[float] = None  # For search results
     
     class Config:
         json_encoders = {
             datetime: lambda dt: dt.isoformat() if dt else None,
             PyObjectId: str
         }
-        
-    def dict(self, *args, **kwargs):
-        """Customize dictionary representation."""
-        d = super().dict(*args, **kwargs)
-        # Remove internal fields
-        d.pop('geocoding_results', None)
-        return d
 
-class GeoSearchQuery(BaseModel):
+class GeoSearchQuery(AuditedModel):
     """Model for geographic search parameters."""
     
-    center: Coordinates
+    coordinates: Coordinates
     radius: float = Field(..., gt=0, le=100)  # Radius in kilometers
+    filters: Optional[Dict[str, Any]] = None
     limit: Optional[int] = Field(default=10, ge=1, le=100)
     
-    class Config:
-        json_encoders = {
-            PyObjectId: str
-        }
+    @field_validator('radius')
+    def validate_radius(cls, v: float) -> float:
+        """Validate search radius."""
+        if v <= 0 or v > 100:
+            raise ValueError("Search radius must be between 0 and 100 kilometers")
+        return v

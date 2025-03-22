@@ -1,43 +1,249 @@
-#backend/app/models/init.py
+"""Model initialization and organization for the ATS Network System.
 
-"""Data models and validation schemas."""
-from .user import User, UserCreate, UserUpdate, UserInDB, UserResponse
-from .center import ATSCenter, CenterCreate, CenterUpdate, CenterResponse
-from .test import TestSession, TestResult, TestResponse
-from .vehicle import Vehicle, VehicleCreate, VehicleResponse
-from .location import Location, LocationCreate, LocationResponse
-from .common import BaseModel, PyObjectId
+This module serves as the central point for importing all model definitions
+and provides version control and metadata for the models package.
+"""
+
+__version__ = "1.0.0"
+__author__ = "ATS Network Team"
+
+from datetime import datetime
+
+# Common Models
+from .common import (
+    BaseModel,
+    PyObjectId,
+    TimestampedModel,
+    DocumentModel,
+    StatusModel,
+    MetadataModel,
+    AuditedModel
+)
+
+# Location Models
+from .location import (
+    Coordinates,
+    Address,
+    Location,
+    LocationCreate,
+    LocationUpdate,
+    LocationResponse,
+    GeoSearchQuery
+)
+
+# User Models
+from .user import (
+    User,
+    UserCreate,
+    UserUpdate,
+    UserInDB,
+    UserResponse,
+    UserSession,
+    UserPermission,
+    ActivityLog,
+    SecurityProfile,
+    RoleAssignment,
+    UserProfile
+)
+
+# Center Models
+from .center import (
+    ATSCenter,
+    CenterCreate,
+    CenterUpdate,
+    CenterResponse,
+    CenterEquipment,
+    CenterDocument,
+    CenterStatistics
+)
+
+# Test Models
+from .test import (
+    TestSession,
+    TestResult,
+    TestResponse,
+    TestStep,
+    TestMeasurement,
+    QualityCheck,
+    TestVerification,
+    TestProcedure,
+    TestMonitoring,
+    TestCalibration
+)
+
+# Vehicle Models
+from .vehicle import (
+    Vehicle,
+    VehicleCreate,
+    VehicleUpdate,
+    VehicleResponse,
+    VehicleCategory,
+    DocumentVerification,
+    TestHistoryEntry,
+    OwnershipRecord
+)
+
+# Notification Models
+from .notification import (
+    Notification,
+    NotificationTemplate,
+    DeliveryAttempt,
+    NotificationPreferences,
+    NotificationGroup,
+    NotificationBatch,
+    EmailNotification,
+    SMSNotification,
+    PushNotification,
+    NotificationStatus
+)
+
+# Audit Models
+from .audit import (
+    AuditEvent,
+    AuditCategory,
+    AuditAction,
+    EntityType,
+    DataChange,
+    SecurityContext,
+    ComplianceMetadata,
+    AuditLogQuery,
+    AuditTrail,
+    ComplianceReport,
+    AuditArchive,
+    AuditConfiguration
+)
+
+# Report Models
+from .report import (
+    Report,
+    ReportType,
+    ReportFormat,
+    ReportSection,
+    ReportTemplate,
+    ReportSchedule,
+    ReportGeneration,
+    ReportDistribution,
+    ReportAccess
+)
+
+# Monitoring Models
+from .monitoring import (
+    SystemHealth,
+    PerformanceMetrics,
+    ResourceUtilization,
+    AlertConfiguration,
+    MonitoringThreshold,
+    ServiceStatus
+)
 
 __all__ = [
-    # User models
-    'User',
-    'UserCreate',
-    'UserUpdate',
-    'UserInDB',
-    'UserResponse',
+    # Common Models
+    "BaseModel",
+    "PyObjectId",
+    "TimestampedModel",
+    "DocumentModel",
+    "StatusModel",
+    "MetadataModel",
+    "AuditedModel",
     
-    # Center models
-    'ATSCenter',
-    'CenterCreate',
-    'CenterUpdate',
-    'CenterResponse',
+    # Location Models
+    "Coordinates",
+    "Address",
+    "Location",
+    "LocationCreate",
+    "LocationUpdate",
+    "LocationResponse",
+    "GeoSearchQuery",
     
-    # Test models
-    'TestSession',
-    'TestResult',
-    'TestResponse',
+    # User Models
+    "User",
+    "UserCreate",
+    "UserUpdate",
+    "UserInDB",
+    "UserResponse",
+    "UserSession",
+    "UserPermission",
+    "ActivityLog",
+    "SecurityProfile",
+    "RoleAssignment",
+    "UserProfile",
     
-    # Vehicle models
-    'Vehicle',
-    'VehicleCreate',
-    'VehicleResponse',
+    # Center Models
+    "ATSCenter",
+    "CenterCreate",
+    "CenterUpdate",
+    "CenterResponse",
+    "CenterEquipment",
+    "CenterDocument",
+    "CenterStatistics",
     
-    # Location models
-    'Location',
-    'LocationCreate',
-    'LocationResponse',
+    # Test Models
+    "TestSession",
+    "TestResult",
+    "TestResponse",
+    "TestStep",
+    "TestMeasurement",
+    "QualityCheck",
+    "TestVerification",
+    "TestProcedure",
+    "TestMonitoring",
+    "TestCalibration",
     
-    # Base models
-    'BaseModel',
-    'PyObjectId'
+    # Vehicle Models
+    "Vehicle",
+    "VehicleCreate",
+    "VehicleUpdate",
+    "VehicleResponse",
+    "VehicleCategory",
+    "DocumentVerification",
+    "TestHistoryEntry",
+    "OwnershipRecord",
+    
+    # Notification Models
+    "Notification",
+    "NotificationTemplate",
+    "DeliveryAttempt",
+    "NotificationPreferences",
+    "NotificationGroup",
+    "NotificationBatch",
+    "EmailNotification",
+    "SMSNotification",
+    "PushNotification",
+    "NotificationStatus",
+    
+    # Audit Models
+    "AuditEvent",
+    "AuditCategory",
+    "AuditAction",
+    "EntityType",
+    "DataChange",
+    "SecurityContext",
+    "ComplianceMetadata",
+    "AuditLogQuery",
+    "AuditTrail",
+    "ComplianceReport",
+    "AuditArchive",
+    "AuditConfiguration",
+    
+    # Report Models
+    "Report",
+    "ReportType",
+    "ReportFormat",
+    "ReportSection",
+    "ReportTemplate",
+    "ReportSchedule",
+    "ReportGeneration",
+    "ReportDistribution",
+    "ReportAccess",
+    
+    # Monitoring Models
+    "SystemHealth",
+    "PerformanceMetrics",
+    "ResourceUtilization",
+    "AlertConfiguration",
+    "MonitoringThreshold",
+    "ServiceStatus"
 ]
+
+# Module initialization timestamp
+MODULE_INITIALIZED = datetime.utcnow()

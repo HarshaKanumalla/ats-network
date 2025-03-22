@@ -1,29 +1,38 @@
+#backend/app/core/auth/manager.py
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, Tuple
 import logging
 import jwt
-import bcrypt
+import redis
 from fastapi import HTTPException, status
 
 from ...database import get_database
 from ..exceptions import AuthenticationError, SecurityError
-from ..security import SecurityManager
+from ..security.base import SecurityBase
+from .base import AuthenticationBase, SessionBase
 from .token import TokenService
 from .rbac import RoleBasedAccessControl
 from ...config import get_settings
+from ...core.service import BaseService
+from ..utils.security_utils import verify_password
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-class AuthenticationManager:
-    """Manages all authentication-related operations and security controls."""
+class AuthenticationManager(BaseService, AuthenticationBase, SessionBase):
+    """Manages all authentication-related operations."""
     
     def __init__(self):
         """Initialize authentication manager with required services."""
+        BaseService.__init__(self)
+        AuthenticationBase.__init__(self)
+        SessionBase.__init__(self)
+        
+        self._initialized = False
         self.security = SecurityManager()
-        self.token_service = TokenService()
-        self.rbac = RoleBasedAccessControl()
-        self.db = None
+        self.token_service = None
+        self.rbac = None
+        self.redis = None
         
         # Session management settings
         self.max_sessions = 5
@@ -37,6 +46,26 @@ class AuthenticationManager:
         
         logger.info("Authentication manager initialized")
 
+    async def initialize(self) -> None:
+        """Initialize authentication manager with required services."""
+        if not self._initialized:
+            await super().initialize()
+            
+            # Initialize required services
+            self.token_service = TokenService()
+            self.rbac = RoleBasedAccessControl()
+            
+            # Initialize Redis connection
+            self.redis = redis.Redis(
+                host=settings.REDIS_HOST,
+                port=settings.REDIS_PORT,
+                password=settings.REDIS_PASSWORD,
+                decode_responses=True
+            )
+            
+            self._initialized = True
+            logger.info("Authentication manager services initialized")
+
     async def authenticate_user(
         self,
         email: str,
@@ -44,25 +73,13 @@ class AuthenticationManager:
         user_agent: str,
         ip_address: str
     ) -> Dict[str, Any]:
-        """Authenticate user and generate access tokens.
-        
-        Args:
-            email: User's email address
-            password: User's password
-            user_agent: Client user agent
-            ip_address: Client IP address
-            
-        Returns:
-            Authentication tokens and user information
-            
-        Raises:
-            AuthenticationError: If authentication fails
-        """
+        """Authenticate user and generate access tokens."""
+        if not self._initialized:
+            await self.initialize()
+
         try:
-            db = await get_database()
-            
             # Get user record
-            user = await db.users.find_one({"email": email})
+            user = await self.db.users.find_one({"email": email})
             if not user:
                 raise AuthenticationError("Invalid credentials")
                 
@@ -83,33 +100,18 @@ class AuthenticationManager:
                 raise AuthenticationError("Invalid credentials")
             
             # Generate tokens
-            access_token, refresh_token = await self.token_service.create_tokens(
-                user_id=str(user["_id"]),
-                user_data={
-                    "role": user["role"],
-                    "permissions": user["permissions"],
-                    "center_id": str(user.get("centerId"))
-                }
-            )
+            tokens = await self._generate_auth_tokens(user)
             
             # Create session record
             await self._create_session(
                 user_id=str(user["_id"]),
                 user_agent=user_agent,
                 ip_address=ip_address,
-                refresh_token=refresh_token
+                refresh_token=tokens["refresh_token"]
             )
             
-            # Update user's last login
-            await db.users.update_one(
-                {"_id": user["_id"]},
-                {
-                    "$set": {
-                        "lastLogin": datetime.utcnow(),
-                        "loginAttempts": 0
-                    }
-                }
-            )
+            # Update login status
+            await self._update_login_status(user["_id"])
             
             # Log successful authentication
             await self._log_authentication(
@@ -120,8 +122,7 @@ class AuthenticationManager:
             )
             
             return {
-                "access_token": access_token,
-                "refresh_token": refresh_token,
+                **tokens,
                 "user": self._format_user_response(user)
             }
             
@@ -132,17 +133,7 @@ class AuthenticationManager:
             raise AuthenticationError("Authentication failed")
 
     async def verify_token(self, token: str) -> Dict[str, Any]:
-        """Verify and decode authentication token.
-        
-        Args:
-            token: Authentication token to verify
-            
-        Returns:
-            Decoded token payload
-            
-        Raises:
-            AuthenticationError: If token is invalid
-        """
+        """Verify and decode authentication token."""
         try:
             # Check token blacklist
             if token in self.token_blacklist:
@@ -171,16 +162,7 @@ class AuthenticationManager:
         current_password: str,
         new_password: str
     ) -> None:
-        """Change user's password with history tracking.
-        
-        Args:
-            user_id: ID of user
-            current_password: Current password
-            new_password: New password
-            
-        Raises:
-            SecurityError: If password change fails
-        """
+        """Change user's password with history tracking."""
         try:
             db = await get_database()
             
@@ -237,14 +219,7 @@ class AuthenticationManager:
             raise SecurityError("Failed to change password")
 
     async def invalidate_token(self, token: str) -> None:
-        """Invalidate authentication token.
-        
-        Args:
-            token: Token to invalidate
-            
-        Raises:
-            SecurityError: If invalidation fails
-        """
+        """Invalidate authentication token."""
         try:
             # Add to blacklist
             self.token_blacklist.add(token)
@@ -296,25 +271,48 @@ class AuthenticationManager:
             logger.error(f"Session creation error: {str(e)}")
             raise SecurityError("Failed to create session")
 
+    async def _generate_auth_tokens(
+        self,
+        user: Dict[str, Any]
+    ) -> Dict[str, str]:
+        """Generate authentication tokens for user."""
+        return await self.token_service.create_tokens(
+            user_id=str(user["_id"]),
+            user_data={
+                "role": user["role"],
+                "permissions": user.get("permissions", []),
+                "center_id": str(user.get("centerId")) if user.get("centerId") else None
+            }
+        )
+
+    async def _update_login_status(self, user_id: str) -> None:
+        """Update user's login status."""
+        await self.db.users.update_one(
+            {"_id": user_id},
+            {
+                "$set": {
+                    "lastLogin": datetime.utcnow(),
+                    "loginAttempts": 0,
+                    "lockedUntil": None
+                }
+            }
+        )
+
     async def _handle_failed_login(self, user_id: str) -> None:
         """Handle failed login attempt."""
         try:
-            db = await get_database()
-            
-            # Increment failed attempts
-            result = await db.users.update_one(
+            result = await self.db.users.find_one_and_update(
                 {"_id": user_id},
                 {
                     "$inc": {"loginAttempts": 1},
                     "$set": {"lastFailedLogin": datetime.utcnow()}
-                }
+                },
+                return_document=True
             )
             
-            if result.modified_count > 0:
-                user = await db.users.find_one({"_id": user_id})
-                if user["loginAttempts"] >= self.max_login_attempts:
-                    await self._lock_account(user_id)
-                    
+            if result["loginAttempts"] >= self.max_login_attempts:
+                await self._lock_account(user_id)
+                
         except Exception as e:
             logger.error(f"Failed login handling error: {str(e)}")
 
@@ -349,8 +347,7 @@ class AuthenticationManager:
     async def _lock_account(self, user_id: str) -> None:
         """Lock account after max failed attempts."""
         try:
-            db = await get_database()
-            await db.users.update_one(
+            await self.db.users.update_one(
                 {"_id": user_id},
                 {
                     "$set": {
@@ -361,6 +358,16 @@ class AuthenticationManager:
             
         except Exception as e:
             logger.error(f"Account locking error: {str(e)}")
+
+    async def cleanup(self) -> None:
+        """Cleanup authentication manager resources."""
+        try:
+            if self.redis:
+                await self.redis.close()
+            await super().cleanup()
+            logger.info("Authentication manager cleaned up")
+        except Exception as e:
+            logger.error(f"Cleanup error: {str(e)}")
 
     async def _cleanup_token_blacklist(self) -> None:
         """Remove expired tokens from blacklist."""

@@ -1,164 +1,205 @@
 #backend/app/models/vehicle.py
 
-"""Vehicle-related data models."""
-from typing import Optional, List, Dict, Any
-from pydantic import Field, field_validator
+
 from datetime import datetime, date
+from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field, validator
 import re
 
-from .common import AuditedModel, PyObjectId
+from .common import TimestampedModel, PyObjectId
+from ..core.constants import DocumentType
 
-class DocumentVerification(AuditedModel):
-    """Document verification status tracking."""
+class DocumentVerification(TimestampedModel):
+    """Document verification status and history."""
     
-    document_number: str = Field(..., min_length=5, max_length=50)
-    document_type: str = Field(...)
-    issue_date: Optional[date] = None
+    document_type: DocumentType
+    document_number: str
+    issue_date: date
     expiry_date: Optional[date] = None
-    issuing_authority: str = Field(...)
+    issuing_authority: str
     
-    verification_status: str = Field(default="pending")
+    document_url: str
+    verification_status: str = "pending"
     verified_by: Optional[PyObjectId] = None
     verified_at: Optional[datetime] = None
     verification_notes: Optional[str] = None
-    document_url: Optional[str] = None
-
-    class Config:
-        json_encoders = {
-            datetime: lambda dt: dt.isoformat() if dt else None,
-            date: lambda d: d.isoformat() if d else None,
-            PyObjectId: str
-        }
-
-class VehicleBase(AuditedModel):
-    """Base vehicle model."""
     
-    registration_number: str = Field(
-        ...,
-        description="Vehicle registration number",
-        regex=r'^[A-Z]{2}[0-9]{2}[A-Z]{1,2}[0-9]{4}
-    )
-    vehicle_type: str = Field(..., description="Type of vehicle")
-    manufacturing_year: int = Field(..., ge=1900, le=datetime.now().year)
+    renewal_reminder_sent: bool = False
+    last_reminder_date: Optional[datetime] = None
+    
+    @validator('expiry_date')
+    def validate_expiry(cls, v: Optional[date], values: Dict[str, Any]) -> Optional[date]:
+        """Validate document expiry date."""
+        if v and v <= values['issue_date']:
+            raise ValueError("Expiry date must be after issue date")
+        return v
+
+class TestHistoryEntry(BaseModel):
+    """Test history record for a vehicle."""
+    
+    test_session_id: PyObjectId
+    test_date: datetime
+    center_id: PyObjectId
+    test_types: List[str]
+    results: Dict[str, Any]
+    overall_status: str
+    certificate_number: Optional[str] = None
+    certificate_url: Optional[str] = None
+    next_test_due: Optional[datetime] = None
+    inspector_notes: Optional[str] = None
+
+class OwnershipRecord(TimestampedModel):
+    """Vehicle ownership record."""
+    
+    owner_name: str
+    contact_number: str
+    address: str
+    ownership_type: str  # individual/company/government
+    registration_number: str
+    transfer_date: datetime
+    transfer_document_url: Optional[str] = None
+    verified_by: Optional[PyObjectId] = None
+    verification_status: str = "pending"
+
+class VehicleCategory(BaseModel):
+    """Vehicle category and classification."""
+    
+    main_category: str  # passenger/commercial/special
+    sub_category: str
+    seating_capacity: Optional[int] = None
+    gross_weight: Optional[float] = None
+    axle_configuration: Optional[str] = None
+    fuel_type: str
+    emission_standard: str
+
+class Vehicle(TimestampedModel):
+    """Enhanced vehicle model with comprehensive tracking."""
+    
+    registration_number: str = Field(..., regex=r'^[A-Z]{2}[0-9]{2}[A-Z]{1,2}[0-9]{4}$')
     chassis_number: str = Field(..., min_length=17, max_length=17)
-    engine_number: str = Field(..., min_length=6, max_length=20)
+    engine_number: str
+    model_name: str
+    manufacturer: str
+    manufacturing_year: int
     
-    # Owner information
-    owner_info: Dict[str, str] = Field(
-        ...,
-        description="Vehicle owner information"
-    )
+    category: VehicleCategory
+    registered_center: PyObjectId
     
-    # Document verification
-    rc_card: DocumentVerification
-    fitness_certificate: Optional[DocumentVerification] = None
-    insurance: DocumentVerification
-    
-    # Additional documents
-    additional_documents: List[DocumentVerification] = Field(default_factory=list)
+    # Document management
+    documents: Dict[str, DocumentVerification] = {}
+    document_history: List[Dict[str, Any]] = []
     
     # Test history
+    test_history: List[TestHistoryEntry] = []
     last_test_date: Optional[datetime] = None
     next_test_due: Optional[datetime] = None
-    test_history: List[PyObjectId] = Field(default_factory=list)
-
-    @field_validator('registration_number')
-    def validate_registration_number(cls, v: str) -> str:
-        """Validate vehicle registration number format."""
-        pattern = re.compile(r'^[A-Z]{2}[0-9]{2}[A-Z]{1,2}[0-9]{4})
-        if not pattern.match(v):
-            raise ValueError('Invalid registration number format')
-        return v
-
-    @field_validator('chassis_number')
-    def validate_chassis_number(cls, v: str) -> str:
-        """Validate chassis number format."""
-        if not re.match(r'^[A-HJ-NPR-Z0-9]{17}, v):
-            raise ValueError('Invalid chassis number format')
-        return v
-
-class VehicleCreate(VehicleBase):
-    """Model for creating a new vehicle record."""
+    test_status: str = "pending"
     
-    # Document files will be handled separately through file upload
-    rc_card_file: Optional[str] = None
-    insurance_file: Optional[str] = None
-    fitness_certificate_file: Optional[str] = None
-    additional_files: List[str] = Field(default_factory=list)
-
-class VehicleUpdate(VehicleBase):
-    """Model for updating vehicle information."""
-    
-    registration_number: Optional[str] = None
-    vehicle_type: Optional[str] = None
-    manufacturing_year: Optional[int] = None
-    chassis_number: Optional[str] = None
-    engine_number: Optional[str] = None
-    owner_info: Optional[Dict[str, str]] = None
-    
-    rc_card: Optional[DocumentVerification] = None
-    fitness_certificate: Optional[DocumentVerification] = None
-    insurance: Optional[DocumentVerification] = None
-
-class VehicleInDB(VehicleBase):
-    """Internal vehicle model with additional fields."""
-    
-    # Testing center references
-    registered_center: PyObjectId = Field(
-        ..., 
-        description="Primary ATS center for the vehicle"
-    )
-    test_history_centers: List[PyObjectId] = Field(default_factory=list)
-    
-    # Document storage
-    document_urls: Dict[str, str] = Field(default_factory=dict)
+    # Ownership tracking
+    current_owner: OwnershipRecord
+    ownership_history: List[OwnershipRecord] = []
     
     # Status tracking
-    verification_status: str = Field(default="pending")
-    is_active: bool = Field(default=True)
-    deactivation_reason: Optional[str] = None
-    
-    # Automated flags
-    requires_testing: bool = Field(default=False)
-    test_overdue: bool = Field(default=False)
-    documents_expiring: bool = Field(default=False)
+    status: str = "active"
+    status_history: List[Dict[str, Any]] = []
+    last_status_change: Optional[datetime] = None
     
     class Config:
+        """Model configuration."""
+        validate_assignment = True
         json_encoders = {
-            datetime: lambda dt: dt.isoformat() if dt else None,
-            date: lambda d: d.isoformat() if d else None,
+            datetime: lambda dt: dt.isoformat(),
+            date: lambda d: d.isoformat(),
             PyObjectId: str
         }
 
-class VehicleResponse(VehicleBase):
-    """Vehicle information response model."""
-    
-    id: PyObjectId = Field(..., alias="_id")
-    registered_center: Dict[str, Any] = Field(...)
-    test_summary: Dict[str, Any] = Field(
-        default_factory=lambda: {
-            "total_tests": 0,
-            "last_test_status": None,
-            "next_due_date": None
-        }
-    )
-    
-    verification_status: str
-    requires_testing: bool
-    test_overdue: bool
-    documents_expiring: bool
-    
-    class Config:
-        json_encoders = {
-            datetime: lambda dt: dt.isoformat() if dt else None,
-            date: lambda d: d.isoformat() if d else None,
-            PyObjectId: str
-        }
+    @validator('manufacturing_year')
+    def validate_year(cls, v: int) -> int:
+        """Validate manufacturing year."""
+        current_year = datetime.now().year
+        if not 1900 <= v <= current_year:
+            raise ValueError(f"Year must be between 1900 and {current_year}")
+        return v
+
+    def add_document(
+        self,
+        document_type: DocumentType,
+        document_data: Dict[str, Any]
+    ) -> None:
+        """Add new document with history tracking."""
+        if document_type in self.documents:
+            # Archive old document
+            old_doc = self.documents[document_type]
+            self.document_history.append({
+                **old_doc.dict(),
+                "archived_at": datetime.utcnow()
+            })
         
-    def dict(self, *args, **kwargs):
-        """Customize dictionary representation."""
-        d = super().dict(*args, **kwargs)
-        # Remove sensitive or internal fields
-        d.pop('document_urls', None)
-        d.pop('deactivation_reason', None)
-        return d
+        self.documents[document_type] = DocumentVerification(**document_data)
+
+    def update_status(
+        self,
+        new_status: str,
+        reason: str,
+        updated_by: PyObjectId
+    ) -> None:
+        """Update vehicle status with history tracking."""
+        if new_status == self.status:
+            return
+            
+        self.status_history.append({
+            "previous_status": self.status,
+            "new_status": new_status,
+            "reason": reason,
+            "updated_by": updated_by,
+            "updated_at": datetime.utcnow()
+        })
+        
+        self.status = new_status
+        self.last_status_change = datetime.utcnow()
+
+    def add_test_record(
+        self,
+        test_entry: TestHistoryEntry
+    ) -> None:
+        """Add test record with updates to related fields."""
+        self.test_history.append(test_entry)
+        self.last_test_date = test_entry.test_date
+        self.next_test_due = test_entry.next_test_due
+        self.test_status = test_entry.overall_status
+
+    def transfer_ownership(
+        self,
+        new_owner: OwnershipRecord
+    ) -> None:
+        """Transfer vehicle ownership with history tracking."""
+        if self.current_owner:
+            self.ownership_history.append(self.current_owner)
+        self.current_owner = new_owner
+
+    def check_document_validity(self) -> Dict[str, bool]:
+        """Check validity of all documents."""
+        current_date = datetime.utcnow().date()
+        return {
+            doc_type: (
+                doc.verification_status == "verified" and
+                (doc.expiry_date is None or doc.expiry_date > current_date)
+            )
+            for doc_type, doc in self.documents.items()
+        }
+
+    def get_test_summary(self) -> Dict[str, Any]:
+        """Generate test history summary."""
+        if not self.test_history:
+            return {"status": "no_tests"}
+            
+        return {
+            "total_tests": len(self.test_history),
+            "last_test": {
+                "date": self.last_test_date,
+                "status": self.test_status,
+                "center_id": self.test_history[-1].center_id
+            },
+            "next_due": self.next_test_due,
+            "test_status": self.test_status
+        }

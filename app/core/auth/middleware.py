@@ -1,3 +1,5 @@
+# backend/app/core/auth/middleware.py
+
 from fastapi import Request, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional, Callable, Dict, Any
@@ -27,9 +29,9 @@ class AuthenticationMiddleware:
         
         # Redis connection for rate limiting and token blacklist
         self.redis = redis.Redis(
-            host=settings.redis_host,
-            port=settings.redis_port,
-            password=settings.redis_password,
+            host=settings.REDIS_HOST,
+            port=settings.REDIS_PORT,
+            password=settings.REDIS_PASSWORD,
             decode_responses=True
         )
         
@@ -70,18 +72,7 @@ class AuthenticationMiddleware:
         request: Request,
         call_next: Callable
     ) -> Any:
-        """Process each request for authentication and security checks.
-        
-        Args:
-            request: Incoming request
-            call_next: Next request handler
-            
-        Returns:
-            Response from next handler
-            
-        Raises:
-            HTTPException: If authentication or security checks fail
-        """
+        """Process each request for authentication and security checks."""
         try:
             path = request.url.path
             start_time = datetime.utcnow()
@@ -146,14 +137,7 @@ class AuthenticationMiddleware:
             )
 
     async def _security_checks(self, request: Request) -> None:
-        """Perform security checks on request.
-        
-        Args:
-            request: Incoming request
-            
-        Raises:
-            HTTPException: If security checks fail
-        """
+        """Perform security checks on request."""
         try:
             # Validate client IP
             client_ip = request.client.host
@@ -195,14 +179,7 @@ class AuthenticationMiddleware:
             )
 
     async def _check_rate_limit(self, request: Request) -> None:
-        """Check if request is within rate limits.
-        
-        Args:
-            request: Incoming request
-            
-        Raises:
-            HTTPException: If rate limit exceeded
-        """
+        """Check if request is within rate limits."""
         try:
             client_ip = request.client.host
             path = request.url.path
@@ -239,17 +216,7 @@ class AuthenticationMiddleware:
             return None
 
     async def _validate_token(self, token: str) -> Dict[str, Any]:
-        """Validate and decode authentication token.
-        
-        Args:
-            token: Authentication token
-            
-        Returns:
-            Decoded token payload
-            
-        Raises:
-            AuthenticationError: If token is invalid
-        """
+        """Validate and decode authentication token."""
         try:
             # Check token blacklist
             if await self._is_token_blacklisted(token):
@@ -287,15 +254,6 @@ class AuthenticationMiddleware:
     def _is_sensitive_operation(self, path: str) -> bool:
         """Check if operation requires additional security."""
         return path in self.sensitive_paths
-
-    async def _is_token_blacklisted(self, token: str) -> bool:
-        """Check if token is blacklisted."""
-        return await self.redis.exists(f"blacklist:{token}")
-
-    def _verify_token_age(self, payload: Dict[str, Any]) -> bool:
-        """Verify token age is within limits."""
-        issued_at = datetime.fromtimestamp(payload["iat"])
-        return datetime.utcnow() - issued_at <= self.max_token_age
 
     def _validate_headers(self, headers: Dict[str, str]) -> bool:
         """Validate request headers for security."""

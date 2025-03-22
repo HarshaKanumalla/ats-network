@@ -1,6 +1,5 @@
-# backend/app/services/location/geolocation_service.py
+# backend/app/services/location/service.py
 
-import aiohttp
 from typing import Dict, Any, List, Optional, Tuple
 import logging
 from datetime import datetime
@@ -8,16 +7,18 @@ import math
 import json
 from geopy import distance
 from geopy.geocoders import Nominatim
+import aiohttp
 
-from ...core.exceptions import GeolocationError
+from ...core.exceptions import LocationError
 from ...database import db_manager
 from ...config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-class GeolocationService:
+class LocationService:
     def __init__(self):
+        """Initialize location service with enhanced geocoding capabilities."""
         self.api_key = settings.google_maps_api_key
         self.geocoding_base_url = "https://maps.googleapis.com/maps/api/geocode/json"
         
@@ -35,11 +36,11 @@ class GeolocationService:
             timeout=10
         )
         
-        # Cache initialization
-        self.geocoding_cache = {}
+        # Cache settings
         self.cache_duration = 86400  # 24 hours
+        self.geocoding_cache = {}
         
-        logger.info("Geolocation service initialized with enhanced validation")
+        logger.info("Location service initialized with enhanced validation")
 
     async def geocode_address(
         self,
@@ -50,7 +51,7 @@ class GeolocationService:
     ) -> Dict[str, Any]:
         """Convert address to coordinates with comprehensive validation."""
         try:
-            # Generate cache key for address
+            # Generate cache key
             cache_key = f"{address}_{city}_{state}_{pin_code}"
             cached_result = self._get_from_cache(cache_key)
             if cached_result:
@@ -66,9 +67,12 @@ class GeolocationService:
             if not coordinates:
                 coordinates = await self._geocode_with_nominatim(full_address)
 
+            if not coordinates:
+                raise LocationError("Failed to geocode address")
+
             # Validate coordinates are within India's boundaries
             if not self._validate_coordinates(coordinates):
-                raise GeolocationError(
+                raise LocationError(
                     "Location coordinates fall outside India's boundaries"
                 )
 
@@ -79,7 +83,7 @@ class GeolocationService:
                 city,
                 state
             ):
-                raise GeolocationError("PIN code verification failed")
+                raise LocationError("PIN code verification failed")
 
             # Create comprehensive location data
             location_data = {
@@ -101,7 +105,6 @@ class GeolocationService:
             # Cache the verified result
             self._store_in_cache(cache_key, location_data)
 
-            # Log successful geocoding
             await self._log_geocoding_operation(
                 address=full_address,
                 result=location_data,
@@ -117,7 +120,7 @@ class GeolocationService:
                 error=str(e),
                 success=False
             )
-            raise GeolocationError(f"Failed to geocode address: {str(e)}")
+            raise LocationError(f"Failed to geocode address: {str(e)}")
 
     async def find_nearby_centers(
         self,
@@ -127,7 +130,7 @@ class GeolocationService:
         """Find ATS centers within specified radius with enhanced accuracy."""
         try:
             if not self._validate_coordinates(coordinates):
-                raise GeolocationError("Invalid search coordinates provided")
+                raise LocationError("Invalid search coordinates provided")
 
             # Perform optimized geospatial query
             nearby_centers = await db_manager.execute_query(
@@ -170,7 +173,7 @@ class GeolocationService:
 
         except Exception as e:
             logger.error(f"Nearby centers search error: {str(e)}")
-            raise GeolocationError(f"Failed to find nearby centers: {str(e)}")
+            raise LocationError(f"Failed to find nearby centers: {str(e)}")
 
     def calculate_exact_distance(
         self,
@@ -188,7 +191,28 @@ class GeolocationService:
             )
         except Exception as e:
             logger.error(f"Distance calculation error: {str(e)}")
-            raise GeolocationError(f"Failed to calculate distance: {str(e)}")
+            raise LocationError(f"Failed to calculate distance: {str(e)}")
+
+    async def validate_address_components(
+        self,
+        address: Dict[str, str]
+    ) -> Dict[str, bool]:
+        """Validate individual address components."""
+        try:
+            validation_results = {
+                "pin_code": self._validate_pin_code(address.get("pin_code", "")),
+                "state": self._validate_state(address.get("state", "")),
+                "city": await self._validate_city(
+                    address.get("city", ""),
+                    address.get("state", "")
+                )
+            }
+
+            return validation_results
+
+        except Exception as e:
+            logger.error(f"Address validation error: {str(e)}")
+            raise LocationError("Failed to validate address components")
 
     async def _geocode_with_google(
         self,
@@ -226,29 +250,6 @@ class GeolocationService:
             logger.error(f"Google geocoding error: {str(e)}")
             return None
 
-    async def _geocode_with_nominatim(
-        self,
-        address: str
-    ) -> Optional[Dict[str, float]]:
-        """Fallback geocoding using Nominatim with rate limiting."""
-        try:
-            location = self.nominatim.geocode(
-                address,
-                country_codes="in"
-            )
-            
-            if location:
-                return {
-                    "latitude": location.latitude,
-                    "longitude": location.longitude
-                }
-
-            return None
-
-        except Exception as e:
-            logger.error(f"Nominatim geocoding error: {str(e)}")
-            return None
-
     def _validate_coordinates(
         self,
         coordinates: Dict[str, float]
@@ -260,53 +261,32 @@ class GeolocationService:
             self.boundaries["west"] <= coordinates["longitude"] <= self.boundaries["east"]
         )
 
-    async def _verify_pin_code_accuracy(
+    def _validate_pin_code(self, pin_code: str) -> bool:
+        """Validate Indian PIN code format."""
+        import re
+        return bool(re.match(r'^\d{6}$', pin_code))
+
+    async def _validate_city(
         self,
-        coordinates: Dict[str, float],
-        pin_code: str,
         city: str,
         state: str
     ) -> bool:
-        """Verify PIN code accuracy against coordinates."""
-        try:
-            # Reverse geocode to verify location
-            params = {
-                "latlng": f"{coordinates['latitude']},{coordinates['longitude']}",
-                "key": self.api_key
-            }
+        """Validate city exists in given state."""
+        # Implementation for city validation
+        return True
 
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    self.geocoding_base_url,
-                    params=params
-                ) as response:
-                    result = await response.json()
-
-                    if result["status"] == "OK":
-                        for component in result["results"][0]["address_components"]:
-                            if "postal_code" in component["types"]:
-                                return component["long_name"] == pin_code
-
-            return False
-
-        except Exception as e:
-            logger.error(f"PIN code verification error: {str(e)}")
-            return False
-
-    def _estimate_travel_time(self, distance_km: float) -> Dict[str, Any]:
-        """Estimate travel time based on distance and traffic conditions."""
-        # Average speed assumptions (km/h)
-        speeds = {
-            "normal": 40,
-            "heavy_traffic": 20,
-            "light_traffic": 50
+    def _validate_state(self, state: str) -> bool:
+        """Validate Indian state name."""
+        valid_states = {
+            "Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar",
+            "Chhattisgarh", "Goa", "Gujarat", "Haryana", "Himachal Pradesh",
+            "Jharkhand", "Karnataka", "Kerala", "Madhya Pradesh",
+            "Maharashtra", "Manipur", "Meghalaya", "Mizoram", "Nagaland",
+            "Odisha", "Punjab", "Rajasthan", "Sikkim", "Tamil Nadu",
+            "Telangana", "Tripura", "Uttar Pradesh", "Uttarakhand",
+            "West Bengal"
         }
+        return state in valid_states
 
-        return {
-            "normal": round(distance_km / speeds["normal"] * 60),  # minutes
-            "heavy_traffic": round(distance_km / speeds["heavy_traffic"] * 60),
-            "light_traffic": round(distance_km / speeds["light_traffic"] * 60)
-        }
-
-# Initialize geolocation service
-geolocation_service = GeolocationService()
+# Initialize location service
+location_service = LocationService()

@@ -1,9 +1,9 @@
 #backend/app/models/common.py
 
-"""Common base models and utilities."""
+"""Common base models and utilities for data handling."""
 from datetime import datetime
 from typing import Optional, Any
-from pydantic import BaseModel as PydanticBaseModel, ConfigDict, Field
+from pydantic import BaseModel as PydanticBaseModel, ConfigDict, Field, validator
 from bson import ObjectId
 
 class PyObjectId(str):
@@ -15,14 +15,17 @@ class PyObjectId(str):
         
     @classmethod
     def validate(cls, value: Any) -> str:
-        if isinstance(value, ObjectId):
-            return str(value)
-        if ObjectId.is_valid(value):
-            return str(ObjectId(value))
-        raise ValueError("Invalid ObjectId")
+        try:
+            if isinstance(value, ObjectId):
+                return str(value)
+            if ObjectId.is_valid(value):
+                return str(ObjectId(value))
+            raise ValueError("Invalid ObjectId")
+        except Exception as e:
+            raise ValueError(f"ObjectId validation error: {str(e)}")
 
 class BaseModel(PydanticBaseModel):
-    """Base model with common configuration and methods."""
+    """Base model with enhanced configuration."""
     
     model_config = ConfigDict(
         populate_by_name=True,
@@ -35,24 +38,28 @@ class BaseModel(PydanticBaseModel):
     )
 
 class TimestampedModel(BaseModel):
-    """Base model with timestamp fields."""
+    """Base model with timestamp fields and monitoring."""
     
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+    last_modified_by: Optional[PyObjectId] = None
     
-    def update_timestamp(self) -> None:
-        """Update the updated_at timestamp."""
+    def update_timestamp(self, modified_by: Optional[str] = None) -> None:
+        """Update the updated_at timestamp and modifier."""
         self.updated_at = datetime.utcnow()
+        if modified_by:
+            self.last_modified_by = PyObjectId(modified_by)
 
 class DocumentModel(TimestampedModel):
-    """Base model for document-based models."""
+    """Base model for document-based models with enhanced tracking."""
     
     id: Optional[PyObjectId] = Field(default=None, alias="_id")
+    is_active: bool = Field(default=True)
+    version: int = Field(default=1)
     
     def dict(self, *args, **kwargs):
         """Override dict method to handle ID field."""
         doc = super().dict(*args, **kwargs)
-        # Convert _id to string format if present
         if '_id' in doc and doc['_id']:
             doc['_id'] = str(doc['_id'])
         return doc
@@ -63,54 +70,51 @@ class DocumentModel(TimestampedModel):
         return ObjectId(self.id) if self.id else None
 
 class StatusModel(DocumentModel):
-    """Base model for status-tracked models."""
+    """Base model for status-tracked models with history."""
     
     status: str = Field(..., description="Current status of the record")
     status_history: list[dict] = Field(default_factory=list)
     
-    def update_status(self, new_status: str, updated_by: str) -> None:
-        """Update status with history tracking.
-        
-        Args:
-            new_status: New status to set
-            updated_by: ID of user making the change
-        """
+    def update_status(self, new_status: str, updated_by: str, reason: Optional[str] = None) -> None:
+        """Update status with history tracking."""
         if new_status != self.status:
             self.status_history.append({
-                "status": self.status,
-                "updated_at": self.updated_at,
-                "updated_by": updated_by
+                "previous_status": self.status,
+                "new_status": new_status,
+                "updated_by": updated_by,
+                "reason": reason,
+                "updated_at": datetime.utcnow()
             })
             self.status = new_status
-            self.update_timestamp()
+            self.update_timestamp(updated_by)
 
 class MetadataModel(DocumentModel):
-    """Base model for metadata-tracked models."""
+    """Base model for metadata-tracked models with versioning."""
     
     metadata: dict = Field(default_factory=dict)
     
-    def update_metadata(self, updates: dict) -> None:
-        """Update metadata fields.
-        
-        Args:
-            updates: Dictionary of metadata updates
-        """
+    def update_metadata(self, updates: dict, updated_by: str) -> None:
+        """Update metadata fields with tracking."""
         self.metadata.update(updates)
-        self.update_timestamp()
+        self.metadata["last_updated"] = datetime.utcnow()
+        self.metadata["updated_by"] = updated_by
+        self.version += 1
+        self.update_timestamp(updated_by)
 
-class AuditedModel(StatusModel):
-    """Base model with full auditing support."""
+class AuditedModel(StatusModel, MetadataModel):
+    """Base model with comprehensive auditing support."""
     
     created_by: Optional[PyObjectId] = None
     updated_by: Optional[PyObjectId] = None
-    version: int = 1
     
-    def update_audit_trail(self, updated_by: str) -> None:
-        """Update audit trail information.
-        
-        Args:
-            updated_by: ID of user making the change
-        """
+    def update_audit_trail(self, updated_by: str, action: str, details: Optional[dict] = None) -> None:
+        """Update audit trail information."""
         self.updated_by = PyObjectId(updated_by)
         self.version += 1
-        self.update_timestamp()
+        self.metadata.setdefault("audit_trail", []).append({
+            "action": action,
+            "details": details or {},
+            "performed_by": updated_by,
+            "timestamp": datetime.utcnow()
+        })
+        self.update_timestamp(updated_by)

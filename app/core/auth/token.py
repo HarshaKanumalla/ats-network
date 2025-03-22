@@ -1,3 +1,5 @@
+# backend/app/core/auth/token.py
+
 from datetime import datetime, timedelta
 from typing import Dict, Any, Tuple, Optional
 import jwt
@@ -18,6 +20,8 @@ class TokenService:
     def __init__(self):
         """Initialize token service with configuration."""
         self.db = None
+        self.security_service = None
+        self._initialized = False
         
         # Token settings
         self.access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -33,6 +37,14 @@ class TokenService:
         self.max_token_usage = 1000  # Maximum uses per token
         
         logger.info("Token service initialized with enhanced security features")
+
+    async def initialize(self):
+        """Initialize token service with required dependencies."""
+        if not self._initialized:
+            from ..security import security_manager
+            self.security_service = security_manager
+            self._initialized = True
+            logger.info("Token service dependencies initialized")
 
     async def create_tokens(
         self,
@@ -199,25 +211,34 @@ class TokenService:
             raise TokenError("Failed to refresh tokens")
 
     async def revoke_token(self, token_id: str) -> None:
-        """Revoke token by adding to revocation list.
+    """Revoke specific token and add to blacklist."""
+    try:
+        db = await get_database()
         
-        Args:
-            token_id: Unique token identifier
-            
-        Raises:
-            TokenError: If revocation fails
-        """
-        try:
-            db = await get_database()
-            
-            await db.revoked_tokens.insert_one({
-                "jti": token_id,
-                "revokedAt": datetime.utcnow()
-            })
-            
-        except Exception as e:
-            logger.error(f"Token revocation error: {str(e)}")
-            raise TokenError("Failed to revoke token")
+        # Add to blacklist in Redis
+        await self.redis.setex(
+            f"blacklist:token:{token_id}",
+            self.refresh_token_expires.total_seconds(),
+            "revoked"
+        )
+        
+        # Update token status in database
+        await db.tokens.update_one(
+            {"_id": ObjectId(token_id)},
+            {
+                "$set": {
+                    "status": "revoked",
+                    "revoked_at": datetime.utcnow(),
+                    "updated_at": datetime.utcnow()
+                }
+            }
+        )
+        
+        logger.info(f"Token revoked: {token_id}")
+        
+    except Exception as e:
+        logger.error(f"Token revocation error: {str(e)}")
+        raise TokenError(f"Failed to revoke token: {str(e)}")
 
     async def revoke_all_user_tokens(self, user_id: str) -> None:
         """Revoke all tokens for a specific user.
@@ -330,6 +351,36 @@ class TokenService:
             
         except Exception as e:
             logger.error(f"Token reuse handling error: {str(e)}")
+
+        async def cleanup_blacklist(self) -> None:
+    """Clean up expired entries from token blacklist."""
+    try:
+        pattern = "blacklist:token:*"
+        cursor = 0
+        
+        while True:
+            cursor, keys = await self.redis.scan(
+                cursor=cursor,
+                match=pattern
+            )
+            
+            if keys:
+                # Check and remove expired keys
+                pipeline = self.redis.pipeline()
+                for key in keys:
+                    ttl = await self.redis.ttl(key)
+                    if ttl <= 0:
+                        pipeline.delete(key)
+                
+                await pipeline.execute()
+            
+            if cursor == 0:
+                break
+        
+        logger.info("Completed blacklist cleanup")
+        
+    except Exception as e:
+        logger.error(f"Blacklist cleanup error: {str(e)}")
 
 # Initialize token service
 token_service = TokenService()

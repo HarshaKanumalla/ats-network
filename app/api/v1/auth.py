@@ -274,43 +274,68 @@ async def refresh_token(response: Response) -> Dict[str, str]:
             detail="Failed to refresh token"
         )
 
-@router.post("/logout")
-async def logout(response: Response) -> Dict[str, str]:
-    """Log out user by invalidating tokens.
-    
-    Args:
-        response: FastAPI response object for clearing cookie
-        
-    Returns:
-        Success message
-        
-    Raises:
-        HTTPException: If logout fails
-    """
+@router.post("/logout", response_model=Dict[str, str])
+async def logout(
+    current_user = Depends(get_current_user),
+    response: Response = None,
+    refresh_token: Optional[str] = Cookie(None, alias=settings.REFRESH_TOKEN_COOKIE_NAME)
+) -> Dict[str, str]:
+    """Logout user and invalidate all active tokens."""
     try:
-        # Get refresh token
-        refresh_token = request.cookies.get(settings.refresh_token_cookie_name)
+        db = await get_database()
+        
+        # Invalidate current session
         if refresh_token:
-            # Invalidate tokens
-            await token_service.invalidate_tokens(refresh_token)
-
+            await token_service.invalidate_token(refresh_token)
+        
         # Clear refresh token cookie
-        response.delete_cookie(
-            key=settings.refresh_token_cookie_name,
-            httponly=True,
-            secure=settings.cookie_secure,
-            samesite="lax",
-            domain=settings.cookie_domain
+        if response:
+            response.delete_cookie(
+                key=settings.REFRESH_TOKEN_COOKIE_NAME,
+                httponly=True,
+                secure=settings.COOKIE_SECURE,
+                samesite=settings.COOKIE_SAMESITE,
+                domain=settings.COOKIE_DOMAIN
+            )
+        
+        # Update user's last logout time
+        await db.users.update_one(
+            {"_id": ObjectId(current_user.id)},
+            {
+                "$set": {
+                    "last_logout": datetime.utcnow(),
+                    "updated_at": datetime.utcnow()
+                }
+            }
         )
-
-        return {"message": "Successfully logged out"}
-
+        
+        # Invalidate all active sessions for the user
+        await token_service.invalidate_all_user_tokens(str(current_user.id))
+        
+        # Log logout event
+        await audit_service.log_activity(
+            user_id=str(current_user.id),
+            action="logout",
+            entity_type="user",
+            entity_id=str(current_user.id),
+            metadata={
+                "ip_address": request.client.host,
+                "user_agent": request.headers.get("user-agent")
+            }
+        )
+        
+        return {
+            "status": "success",
+            "message": "Successfully logged out"
+        }
+        
     except Exception as e:
         logger.error(f"Logout error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Logout failed"
+            detail="Failed to complete logout"
         )
+
 
 @router.post("/verify-email/{token}")
 async def verify_email(token: str) -> Dict[str, str]:
@@ -421,4 +446,67 @@ async def reset_password(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Password reset failed"
+        )
+
+@router.post("/token/revoke/{token_id}", response_model=Dict[str, str])
+async def revoke_token(
+    token_id: str,
+    current_user = Depends(get_current_user),
+    _=Depends(require_permission(RolePermission.MANAGE_TOKENS))
+) -> Dict[str, str]:
+    """Revoke specific token."""
+    try:
+        await token_service.revoke_token(token_id)
+        
+        await audit_service.log_activity(
+            user_id=str(current_user.id),
+            action="revoke_token",
+            entity_type="token",
+            entity_id=token_id,
+            metadata={
+                "revoked_at": datetime.utcnow().isoformat()
+            }
+        )
+        
+        return {
+            "status": "success",
+            "message": "Token revoked successfully"
+        }
+        
+    except Exception as e:
+        logger.error(f"Token revocation error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to revoke token"
+        )
+
+@router.post("/token/revoke-all", response_model=Dict[str, str])
+async def revoke_all_tokens(
+    current_user = Depends(get_current_user),
+    _=Depends(require_permission(RolePermission.MANAGE_TOKENS))
+) -> Dict[str, str]:
+    """Revoke all active tokens for a user."""
+    try:
+        await token_service.invalidate_all_user_tokens(str(current_user.id))
+        
+        await audit_service.log_activity(
+            user_id=str(current_user.id),
+            action="revoke_all_tokens",
+            entity_type="user",
+            entity_id=str(current_user.id),
+            metadata={
+                "revoked_at": datetime.utcnow().isoformat()
+            }
+        )
+        
+        return {
+            "status": "success",
+            "message": "All tokens revoked successfully"
+        }
+        
+    except Exception as e:
+        logger.error(f"Token revocation error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to revoke tokens"
         )

@@ -1,3 +1,5 @@
+# backend/app/core/auth/rbac.py
+
 from typing import Dict, Any, List, Set, Optional
 import logging
 from datetime import datetime
@@ -17,6 +19,9 @@ class RoleBasedAccessControl:
     
     def __init__(self):
         """Initialize RBAC with role hierarchy and permissions."""
+        self.security_service = None
+        self._initialized = False
+
         self.role_hierarchy = {
             "transport_commissioner": [
                 "additional_commissioner",
@@ -124,6 +129,14 @@ class RoleBasedAccessControl:
         }
         
         logger.info("RBAC system initialized with role hierarchy")
+
+    async def initialize(self):
+        """Initialize RBAC system with required dependencies."""
+        if not self._initialized:
+            from ..security import security_manager
+            self.security_service = security_manager
+            self._initialized = True
+            logger.info("RBAC system dependencies initialized")
 
     async def verify_permission(
         self,
@@ -385,3 +398,5 @@ class RoleBasedAccessControl:
 
 # Initialize RBAC system
 rbac_system = RoleBasedAccessControl()
+
+

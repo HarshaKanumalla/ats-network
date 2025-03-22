@@ -11,12 +11,24 @@ from ...services.s3.s3_service import s3_service
 from ...services.notification.notification_service import notification_service
 from ...database import db_manager, database_transaction
 from ...config import get_settings
+from .interfaces import TestServiceInterface, TestMonitorInterface
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-class TestResultService:
-    def __init__(self):
+class TestResultsService:
+    """Service for processing and analyzing test results with interface integration."""
+    
+    def __init__(
+        self,
+        test_service: TestServiceInterface,
+        test_monitor: TestMonitorInterface
+    ):
+        """Initialize results service with test service and monitor interfaces."""
+        self.test_service = test_service
+        self.test_monitor = test_monitor
+        self.db = None
+        
         # Define test criteria and thresholds
         self.test_criteria = {
             "speed_test": {
@@ -43,7 +55,8 @@ class TestResultService:
                 "measurement_duration": 10  # seconds
             }
         }
-        logger.info("Test result service initialized")
+        
+        logger.info("Test results service initialized with interface integration")
 
     async def process_test_results(
         self,
@@ -74,6 +87,14 @@ class TestResultService:
                     }
                 }
 
+                # Update test service
+                await self.test_service.update_test_data(
+                    session_id=session_id,
+                    test_type="results",
+                    data=final_results,
+                    updated_by=operator_id
+                )
+
                 # Store results in database
                 await db_manager.execute_query(
                     collection="test_results",
@@ -98,6 +119,16 @@ class TestResultService:
                     session_id,
                     overall_status,
                     report_url
+                )
+
+                # Update monitoring status
+                await self.test_monitor.process_test_data(
+                    session_id=session_id,
+                    test_type="results_complete",
+                    raw_data={
+                        "status": overall_status,
+                        "report_url": report_url
+                    }
                 )
 
                 logger.info(f"Processed test results for session: {session_id}")
@@ -177,6 +208,23 @@ class TestResultService:
         except Exception as e:
             logger.error(f"Speed test analysis error: {str(e)}")
             raise TestResultError(f"Failed to analyze speed test: {str(e)}")
+
+    async def _determine_test_status(
+        self,
+        analysis_results: Dict[str, Any]
+    ) -> str:
+        """Determine overall test status based on individual test results."""
+        try:
+            # Check if any test failed
+            for test_type, results in analysis_results.items():
+                if results.get("status") == "failed":
+                    return "failed"
+            
+            return "passed"
+            
+        except Exception as e:
+            logger.error(f"Status determination error: {str(e)}")
+            raise TestResultError(f"Failed to determine test status: {str(e)}")
 
     async def _generate_test_report(
         self,
@@ -263,5 +311,52 @@ class TestResultService:
             logger.error(f"Notification error: {str(e)}")
             # Don't raise error as notifications are non-critical
 
-# Initialize test result service
-test_result_service = TestResultService()
+    async def _update_session_status(
+        self,
+        session_id: str,
+        status: str,
+        report_url: str,
+        db_session: Any
+    ) -> None:
+        """Update test session status with results."""
+        try:
+            await db_manager.execute_query(
+                collection="test_sessions",
+                operation="update_one",
+                query={
+                    "_id": ObjectId(session_id)
+                },
+                update={
+                    "$set": {
+                        "status": "completed",
+                        "result_status": status,
+                        "report_url": report_url,
+                        "completed_at": datetime.utcnow()
+                    }
+                },
+                session=db_session
+            )
+        except Exception as e:
+            logger.error(f"Status update error: {str(e)}")
+            raise TestResultError(f"Failed to update session status: {str(e)}")
+
+    async def _get_test_session_data(self, session_id: str) -> Dict[str, Any]:
+        """Retrieve test session details."""
+        try:
+            session_data = await db_manager.execute_query(
+                collection="test_sessions",
+                operation="find_one",
+                query={"_id": ObjectId(session_id)}
+            )
+            
+            if not session_data:
+                raise TestResultError(f"Test session {session_id} not found")
+                
+            return session_data
+            
+        except Exception as e:
+            logger.error(f"Session data retrieval error: {str(e)}")
+            raise TestResultError(f"Failed to retrieve session data: {str(e)}")
+
+# Initialize test results service
+test_results_service = TestResultsService()

@@ -20,6 +20,7 @@ settings = get_settings()
 
 class S3Service:
     def __init__(self):
+        """Initialize S3 service with enhanced configuration."""
         self.s3_client = boto3.client(
             's3',
             aws_access_key_id=settings.aws_access_key_id,
@@ -29,16 +30,38 @@ class S3Service:
         
         self.bucket_name = settings.s3_bucket_name
         
-        # Enhanced configuration settings
-        self.storage_settings = {
+        # Storage configuration
+        self.storage_config = {
             'max_file_size': 10 * 1024 * 1024,  # 10MB
-            'default_expiry': 3600,  # 1 hour for presigned URLs
-            'cleanup_threshold': 30,  # days for temporary file cleanup
-            'chunk_size': 8 * 1024 * 1024,  # 8MB for multipart uploads
-            'max_retries': 3
+            'chunk_size': 8 * 1024 * 1024,      # 8MB for multipart uploads
+            'max_retries': 3,
+            'retry_delay': 1,                    # seconds
+            'default_expiry': 3600,              # 1 hour for presigned URLs
+            'cleanup_threshold': 30              # days for temporary files
         }
         
-        # Valid content types mapping
+        # Document organization
+        self.folder_structure = {
+            'centers': {
+                'documents': ['registration', 'licenses', 'certifications'],
+                'reports': ['performance', 'compliance', 'maintenance']
+            },
+            'vehicles': {
+                'documents': ['registration', 'insurance', 'fitness'],
+                'tests': ['images', 'reports', 'certificates']
+            },
+            'tests': {
+                'reports': ['detailed', 'summary'],
+                'data': ['raw', 'processed'],
+                'images': ['pre', 'post']
+            },
+            'users': {
+                'documents': ['identity', 'qualifications', 'certifications'],
+                'profile': ['images']
+            }
+        }
+        
+        # Content type validation
         self.allowed_content_types = {
             'documents': {
                 'application/pdf': '.pdf',
@@ -50,26 +73,27 @@ class S3Service:
                 'image/png': '.png'
             },
             'reports': {
-                'application/pdf': '.pdf'
+                'application/pdf': '.pdf',
+                'application/vnd.ms-excel': '.xls',
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '.xlsx'
             }
         }
         
-        # Initialize storage management
+        # Initialize storage
         self._ensure_storage_setup()
         logger.info("S3 service initialized with enhanced configuration")
 
-    async def upload_file(
+    async def upload_document(
         self,
         file: UploadFile,
         folder: str,
-        file_type: str,
         metadata: Optional[Dict[str, str]] = None,
-        max_age: Optional[int] = None
+        content_type: Optional[str] = None
     ) -> str:
-        """Upload file with comprehensive validation and error handling."""
+        """Upload document with comprehensive validation and organization."""
         try:
             # Validate file
-            await self._validate_file(file, file_type)
+            await self._validate_file(file)
             
             # Generate unique filename
             filename = await self._generate_unique_filename(file.filename)
@@ -79,42 +103,39 @@ class S3Service:
             upload_args = {
                 'Bucket': self.bucket_name,
                 'Key': key,
-                'ContentType': file.content_type,
+                'ContentType': content_type or file.content_type,
                 'ServerSideEncryption': 'AES256'
             }
             
             if metadata:
                 upload_args['Metadata'] = self._sanitize_metadata(metadata)
             
-            if max_age:
-                upload_args['CacheControl'] = f'max-age={max_age}'
-
             # Handle large file uploads
-            if file.size > self.storage_settings['chunk_size']:
+            if file.size > self.storage_config['chunk_size']:
                 url = await self._handle_multipart_upload(file, upload_args)
             else:
                 url = await self._handle_single_upload(file, upload_args)
-
+            
             # Log upload
             await self._log_file_operation(
                 operation='upload',
                 key=key,
                 metadata=metadata
             )
-
+            
             return url
-
+            
         except Exception as e:
             logger.error(f"File upload error: {str(e)}")
             raise StorageError(f"Failed to upload file: {str(e)}")
 
-    async def get_file_url(
+    async def get_document_url(
         self,
         file_key: str,
         expiry: Optional[int] = None,
         download: bool = False
     ) -> str:
-        """Generate secure URL for file access with custom parameters."""
+        """Generate secure URL for document access."""
         try:
             params = {
                 'Bucket': self.bucket_name,
@@ -127,7 +148,7 @@ class S3Service:
             url = self.s3_client.generate_presigned_url(
                 'get_object',
                 Params=params,
-                ExpiresIn=expiry or self.storage_settings['default_expiry']
+                ExpiresIn=expiry or self.storage_config['default_expiry']
             )
             
             await self._log_file_operation(
@@ -136,13 +157,13 @@ class S3Service:
             )
             
             return url
-
+            
         except Exception as e:
             logger.error(f"URL generation error: {str(e)}")
-            raise StorageError(f"Failed to generate file URL: {str(e)}")
+            raise StorageError("Failed to generate document URL")
 
-    async def delete_file(self, file_key: str) -> None:
-        """Delete file with proper cleanup and verification."""
+    async def delete_document(self, file_key: str) -> None:
+        """Delete document with proper cleanup."""
         try:
             # Verify file exists
             await self._verify_file_exists(file_key)
@@ -160,34 +181,10 @@ class S3Service:
             )
             
             logger.info(f"Successfully deleted file: {file_key}")
-
+            
         except Exception as e:
             logger.error(f"File deletion error: {str(e)}")
-            raise StorageError(f"Failed to delete file: {str(e)}")
-
-    async def cleanup_temporary_files(self) -> None:
-        """Clean up expired temporary files and optimize storage."""
-        try:
-            cutoff_date = datetime.utcnow() - timedelta(
-                days=self.storage_settings['cleanup_threshold']
-            )
-            
-            # List objects to delete
-            paginator = self.s3_client.get_paginator('list_objects_v2')
-            
-            for page in paginator.paginate(Bucket=self.bucket_name):
-                for obj in page.get('Contents', []):
-                    if (
-                        'temp/' in obj['Key'] and 
-                        obj['LastModified'] < cutoff_date
-                    ):
-                        await self.delete_file(obj['Key'])
-            
-            logger.info("Completed temporary file cleanup")
-
-        except Exception as e:
-            logger.error(f"Cleanup operation error: {str(e)}")
-            raise StorageError(f"Failed to cleanup temporary files: {str(e)}")
+            raise StorageError("Failed to delete document")
 
     async def _handle_multipart_upload(
         self,
@@ -204,7 +201,7 @@ class S3Service:
             part_number = 1
             
             while True:
-                chunk = await file.read(self.storage_settings['chunk_size'])
+                chunk = await file.read(self.storage_config['chunk_size'])
                 if not chunk:
                     break
                 
@@ -232,8 +229,8 @@ class S3Service:
                 MultipartUpload={'Parts': parts}
             )
             
-            return await self.get_file_url(upload_args['Key'])
-
+            return await self.get_document_url(upload_args['Key'])
+            
         except Exception as e:
             if upload_id:
                 await self.s3_client.abort_multipart_upload(
@@ -243,43 +240,79 @@ class S3Service:
                 )
             raise
 
-    async def _validate_file(
-        self,
-        file: UploadFile,
-        file_type: str
-    ) -> None:
-        """Validate file size and type with comprehensive checks."""
-        if file.content_type not in self.allowed_content_types.get(file_type, {}):
-            raise StorageError(
-                f"Invalid file type {file.content_type} for {file_type}"
-            )
-
+    async def _validate_file(self, file: UploadFile) -> None:
+        """Validate file with comprehensive checks."""
+        if not file.content_type:
+            raise StorageError("Missing content type")
+            
         # Check file size
-        if file.size > self.storage_settings['max_file_size']:
+        if file.size > self.storage_config['max_file_size']:
             raise StorageError(
                 f"File size {file.size} exceeds maximum allowed size"
             )
-
+            
+        # Validate content type
+        valid_types = []
+        for category in self.allowed_content_types.values():
+            valid_types.extend(category.keys())
+            
+        if file.content_type not in valid_types:
+            raise StorageError(f"Invalid content type: {file.content_type}")
+            
         # Additional security checks
         await self._scan_file_content(file)
 
-    def _ensure_storage_setup(self) -> None:
-        """Ensure S3 bucket exists and has proper configuration."""
-        try:
-            self.s3_client.head_bucket(Bucket=self.bucket_name)
-        except ClientError as e:
-            error_code = int(e.response['Error']['Code'])
-            if error_code == 404:
-                self._create_bucket()
-            else:
-                raise
+    async def _generate_unique_filename(
+        self,
+        original_filename: str
+    ) -> str:
+        """Generate unique filename with content hash."""
+        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        content_hash = hashlib.md5(
+            f"{original_filename}{timestamp}".encode()
+        ).hexdigest()[:8]
+        
+        extension = original_filename.split('.')[-1].lower()
+        return f"{timestamp}_{content_hash}.{extension}"
 
     async def _scan_file_content(self, file: UploadFile) -> None:
         """Scan file content for potential security threats."""
-        # Implementation for file content scanning would go here
-        # This could integrate with virus scanning services or
-        # content validation libraries
-        pass
+        try:
+            # Implement virus scanning or content validation
+            # This could integrate with virus scanning services
+            pass
+        except Exception as e:
+            logger.error(f"File scanning error: {str(e)}")
+            raise StorageError("Failed to scan file content")
+
+    async def _log_file_operation(
+        self,
+        operation: str,
+        key: str,
+        metadata: Optional[Dict[str, str]] = None
+    ) -> None:
+        """Log file operations for auditing."""
+        try:
+            await db_manager.execute_query(
+                collection="file_operations",
+                operation="insert_one",
+                query={
+                    "operation": operation,
+                    "file_key": key,
+                    "metadata": metadata,
+                    "timestamp": datetime.utcnow()
+                }
+            )
+        except Exception as e:
+            logger.error(f"Operation logging error: {str(e)}")
+
+    def _sanitize_metadata(self, metadata: Dict[str, str]) -> Dict[str, str]:
+        """Sanitize metadata for S3 storage."""
+        sanitized = {}
+        for key, value in metadata.items():
+            # Convert all values to strings and remove special characters
+            sanitized[key] = str(value).replace('\n', ' ').strip()
+        return sanitized
 
 # Initialize S3 service
 s3_service = S3Service()

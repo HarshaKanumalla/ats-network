@@ -1,3 +1,5 @@
+#backend/app/core/config.py
+
 from typing import Dict, Any, Optional, List
 import os
 from pathlib import Path
@@ -129,6 +131,34 @@ class Settings(BaseSettings):
         "ats_admin",
         "ats_testing"
     ]
+
+    # Storage Settings (missing in current version)
+    TEMP_FILE_DIR: str = "/tmp/ats_network"
+    DOCUMENT_STORAGE_PATH: str = "/storage/documents"
+    FILE_CLEANUP_INTERVAL: int = 3600  # seconds
+
+    # Redis Enhanced Settings (additional security settings)
+    REDIS_SSL: bool = False
+    REDIS_CONNECTION_TIMEOUT: int = 30
+    REDIS_MAX_CONNECTIONS: int = 100
+    REDIS_RETRY_ON_TIMEOUT: bool = True
+
+    # Backup Settings (missing in current version)
+    BACKUP_ENABLED: bool = True
+    BACKUP_INTERVAL_HOURS: int = 24
+    BACKUP_RETENTION_DAYS: int = 30
+    BACKUP_S3_PREFIX: str = "backups/"
+
+    # Security Enhanced Settings (additional security parameters)
+    PASSWORD_MIN_LENGTH: int = 8
+    PASSWORD_HISTORY_SIZE: int = 5
+    FAILED_LOGIN_ATTEMPTS: int = 5
+    ACCOUNT_LOCKOUT_MINUTES: int = 30
+    
+    # Session Settings (missing in current version)
+    SESSION_TIMEOUT_MINUTES: int = 60
+    MAX_SESSIONS_PER_USER: int = 5
+    SESSION_CLEANUP_INTERVAL: int = 3600  # seconds
     
     class Config:
         """Configuration for the settings class."""
@@ -193,14 +223,19 @@ class Settings(BaseSettings):
             "use_ssl": self.MAIL_SSL
         }
 
-    @property
+@property
     def redis_settings(self) -> Dict[str, Any]:
-        """Get Redis connection settings."""
+        """Get enhanced Redis connection settings."""
         return {
             "host": self.REDIS_HOST,
             "port": self.REDIS_PORT,
             "password": self.REDIS_PASSWORD,
-            "db": self.REDIS_DB
+            "db": self.REDIS_DB,
+            "ssl": self.REDIS_SSL,
+            "connection_timeout": self.REDIS_CONNECTION_TIMEOUT,
+            "max_connections": self.REDIS_MAX_CONNECTIONS,
+            "retry_on_timeout": self.REDIS_RETRY_ON_TIMEOUT,
+            "decode_responses": True
         }
 
     def get_environment_variables(self) -> Dict[str, str]:
