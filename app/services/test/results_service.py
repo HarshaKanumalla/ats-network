@@ -1,10 +1,13 @@
-# backend/app/services/test/results_service.py
-
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 import logging
 import json
 from bson import ObjectId
+from io import BytesIO
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
+from reportlab.lib.styles import getSampleStyleSheet
 
 from ...core.exceptions import TestResultError
 from ...services.s3.s3_service import s3_service
@@ -67,6 +70,9 @@ class TestResultsService:
         """Process and validate complete test results with comprehensive analysis."""
         async with database_transaction() as session:
             try:
+                # Validate data completeness
+                await self.validate_test_data_completeness(test_data)
+                
                 # Validate and analyze test data
                 analysis_results = await self._analyze_test_data(test_data)
                 
@@ -209,6 +215,195 @@ class TestResultsService:
             logger.error(f"Speed test analysis error: {str(e)}")
             raise TestResultError(f"Failed to analyze speed test: {str(e)}")
 
+    async def _analyze_brake_test(self, brake_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze brake test measurements with force and timing validation."""
+        criteria = self.test_criteria["brake_test"]
+        
+        try:
+            measurements = brake_data.get("measurements", [])
+            if not measurements:
+                return {
+                    "status": "failed",
+                    "reason": "No measurements recorded",
+                    "measurements": []
+                }
+
+            # Analyze brake force
+            max_force = max(m["force"] for m in measurements)
+            min_force = min(m["force"] for m in measurements)
+            avg_force = sum(m["force"] for m in measurements) / len(measurements)
+            
+            # Calculate imbalance
+            imbalance = ((max_force - min_force) / max_force) * 100
+            
+            # Analyze reaction time
+            reaction_times = [m["reaction_time"] for m in measurements]
+            avg_reaction_time = sum(reaction_times) / len(reaction_times)
+            
+            # Calculate deceleration
+            deceleration = brake_data.get("deceleration", 0)
+            
+            # Determine status
+            status = "passed"
+            failures = []
+            
+            if avg_force < criteria["min_brake_force"]:
+                status = "failed"
+                failures.append("Insufficient brake force")
+                
+            if imbalance > criteria["max_imbalance"]:
+                status = "failed"
+                failures.append("Brake force imbalance too high")
+                
+            if avg_reaction_time > criteria["reaction_time_limit"]:
+                status = "failed"
+                failures.append("Reaction time too slow")
+                
+            if deceleration < criteria["min_deceleration"]:
+                status = "failed"
+                failures.append("Insufficient deceleration")
+
+            return {
+                "status": status,
+                "failures": failures if status == "failed" else [],
+                "average_force": round(avg_force, 2),
+                "max_force": round(max_force, 2),
+                "imbalance": round(imbalance, 2),
+                "average_reaction_time": round(avg_reaction_time, 3),
+                "deceleration": round(deceleration, 2),
+                "measurements": measurements
+            }
+
+        except Exception as e:
+            logger.error(f"Brake test analysis error: {str(e)}")
+            raise TestResultError(f"Failed to analyze brake test: {str(e)}")
+
+    async def _analyze_headlight_test(
+        self,
+        headlight_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Analyze headlight test measurements with intensity and alignment checks."""
+        criteria = self.test_criteria["headlight_test"]
+        
+        try:
+            left_measurements = headlight_data.get("left", [])
+            right_measurements = headlight_data.get("right", [])
+            
+            if not left_measurements or not right_measurements:
+                return {
+                    "status": "failed",
+                    "reason": "Incomplete measurements",
+                    "measurements": {}
+                }
+
+            def analyze_single_headlight(measurements):
+                intensities = [m["intensity"] for m in measurements]
+                avg_intensity = sum(intensities) / len(intensities)
+                
+                glare_readings = [m["glare"] for m in measurements]
+                max_glare = max(glare_readings)
+                
+                angles = [m["angle"] for m in measurements]
+                avg_angle = sum(angles) / len(angles)
+                
+                return {
+                    "average_intensity": round(avg_intensity, 2),
+                    "max_glare": round(max_glare, 2),
+                    "average_angle": round(avg_angle, 2)
+                }
+
+            left_analysis = analyze_single_headlight(left_measurements)
+            right_analysis = analyze_single_headlight(right_measurements)
+            
+            # Determine status
+            status = "passed"
+            failures = []
+            
+            for side, analysis in [("left", left_analysis), ("right", right_analysis)]:
+                if not (criteria["min_intensity"] <= analysis["average_intensity"] <= criteria["max_intensity"]):
+                    status = "failed"
+                    failures.append(f"{side.capitalize()} headlight intensity out of range")
+                
+                if analysis["max_glare"] > criteria["max_glare"]:
+                    status = "failed"
+                    failures.append(f"{side.capitalize()} headlight glare too high")
+                
+                if abs(analysis["average_angle"]) > criteria["angle_tolerance"]:
+                    status = "failed"
+                    failures.append(f"{side.capitalize()} headlight misaligned")
+
+            return {
+                "status": status,
+                "failures": failures if status == "failed" else [],
+                "left_headlight": left_analysis,
+                "right_headlight": right_analysis,
+                "measurements": {
+                    "left": left_measurements,
+                    "right": right_measurements
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Headlight test analysis error: {str(e)}")
+            raise TestResultError(f"Failed to analyze headlight test: {str(e)}")
+
+    async def _analyze_noise_test(
+        self,
+        noise_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Analyze noise test measurements with ambient noise compensation."""
+        criteria = self.test_criteria["noise_test"]
+        
+        try:
+            measurements = noise_data.get("measurements", [])
+            if len(measurements) < criteria["measurement_duration"]:
+                return {
+                    "status": "failed",
+                    "reason": "Insufficient measurement duration",
+                    "measurements": []
+                }
+
+            # Analyze noise levels
+            noise_levels = [m["noise_level"] for m in measurements]
+            ambient_levels = [m["ambient_level"] for m in measurements]
+            
+            avg_noise = sum(noise_levels) / len(noise_levels)
+            avg_ambient = sum(ambient_levels) / len(ambient_levels)
+            max_noise = max(noise_levels)
+            
+            # Calculate noise differential
+            noise_differential = avg_noise - avg_ambient
+            
+            # Determine status
+            status = "passed"
+            failures = []
+            
+            if avg_ambient > criteria["ambient_threshold"]:
+                status = "failed"
+                failures.append("Ambient noise too high")
+            
+            if max_noise > criteria["max_level"]:
+                status = "failed"
+                failures.append("Maximum noise level exceeded")
+            
+            if noise_differential < 20:  # Minimum difference threshold
+                status = "failed"
+                failures.append("Insufficient noise differential")
+
+            return {
+                "status": status,
+                "failures": failures if status == "failed" else [],
+                "average_noise": round(avg_noise, 2),
+                "max_noise": round(max_noise, 2),
+                "average_ambient": round(avg_ambient, 2),
+                "noise_differential": round(noise_differential, 2),
+                "measurements": measurements
+            }
+
+        except Exception as e:
+            logger.error(f"Noise test analysis error: {str(e)}")
+            raise TestResultError(f"Failed to analyze noise test: {str(e)}")
+
     async def _determine_test_status(
         self,
         analysis_results: Dict[str, Any]
@@ -261,6 +456,75 @@ class TestResultsService:
         except Exception as e:
             logger.error(f"Report generation error: {str(e)}")
             raise TestResultError(f"Failed to generate test report: {str(e)}")
+
+    async def _generate_pdf_report(self, report_data: Dict[str, Any]) -> bytes:
+        """Generate PDF report with test results and visualizations."""
+        try:
+            buffer = BytesIO()
+            doc = SimpleDocTemplate(buffer, pagesize=letter)
+            story = []
+            styles = getSampleStyleSheet()
+            
+            # Add header
+            story.append(Paragraph(
+                f"Test Report - Session {report_data['session_info']['_id']}",
+                styles['Heading1']
+            ))
+            story.append(Paragraph(
+                f"Generated: {report_data['generated_at']}",
+                styles['Normal']
+            ))
+            
+            # Add session info
+            session_data = [
+                ["Vehicle ID", str(report_data['session_info']['vehicle_id'])],
+                ["Test Center", str(report_data['session_info']['center_id'])],
+                ["Status", report_data['test_results']['overall_status'].upper()],
+                ["Completion Time", str(report_data['test_results']['completion_time'])]
+            ]
+            
+            session_table = Table(session_data)
+            session_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 14),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('TEXTCOLOR', (0, 1), (-1, -1), colors.black),
+                ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                ('FONTSIZE', (0, 1), (-1, -1), 12),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            story.append(session_table)
+            
+            # Add test results
+            for test_type, results in report_data['test_results']['test_results'].items():
+                story.append(Paragraph(f"\n{test_type.upper()} Results", styles['Heading2']))
+                
+                result_data = []
+                for key, value in results.items():
+                    if key != 'measurements':
+                        result_data.append([key.replace('_', ' ').title(), str(value)])
+                
+                result_table = Table(result_data)
+                result_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, -1), colors.lightgrey),
+                    ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                    ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 10),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                ]))
+                story.append(result_table)
+            
+            doc.build(story)
+            return buffer.getvalue()
+            
+        except Exception as e:
+            logger.error(f"PDF generation error: {str(e)}")
+            raise TestResultError(f"Failed to generate PDF report: {str(e)}")
 
     async def _send_result_notifications(
         self,
@@ -358,5 +622,23 @@ class TestResultsService:
             logger.error(f"Session data retrieval error: {str(e)}")
             raise TestResultError(f"Failed to retrieve session data: {str(e)}")
 
-# Initialize test results service
-test_results_service = TestResultsService()
+    async def validate_test_data_completeness(
+        self,
+        test_data: Dict[str, Any]
+    ) -> None:
+        """Validate completeness of test data."""
+        required_tests = {"speed_test", "brake_test", "headlight_test", "noise_test"}
+        missing_tests = required_tests - set(test_data.keys())
+        
+        if missing_tests:
+            raise TestResultError(f"Missing required tests: {', '.join(missing_tests)}")
+        
+        for test_type, data in test_data.items():
+            if not data.get("measurements"):
+                raise TestResultError(f"No measurements found for {test_type}")
+
+# Initialize test results service with required interfaces
+test_results_service = TestResultsService(
+    test_service=test_service_instance,  # Import from test service module
+    test_monitor=test_monitor_instance   # Import from test monitor module
+)

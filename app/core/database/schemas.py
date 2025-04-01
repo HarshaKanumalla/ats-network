@@ -1,11 +1,12 @@
 # backend/app/core/database/schemas.py
 
-from typing import Dict, Any
+from typing import Dict, Any, List
 from datetime import datetime
+
 
 class DatabaseSchemas:
     """Manages MongoDB collection schemas and validations."""
-    
+
     @staticmethod
     def get_users_schema() -> Dict[str, Any]:
         """Get users collection schema validation."""
@@ -20,8 +21,8 @@ class DatabaseSchemas:
                     },
                     "passwordHash": {"bsonType": "string"},
                     "role": {
-                        "enum": ["transport_commissioner", "additional_commissioner", 
-                                "rto_officer", "ats_owner", "ats_admin", "ats_testing"]
+                        "enum": ["transport_commissioner", "additional_commissioner",
+                                 "rto_officer", "ats_owner", "ats_admin", "ats_testing"]
                     },
                     "status": {
                         "enum": ["pending", "active", "suspended", "inactive"]
@@ -33,7 +34,7 @@ class DatabaseSchemas:
                     },
                     "centerId": {"bsonType": ["objectId", "null"]},
                     "permissions": {
-                        "bsonType": "array",
+                        "bsonType": ["array", "null"],
                         "items": {"bsonType": "string"}
                     },
                     "lastLogin": {"bsonType": ["date", "null"]},
@@ -155,7 +156,7 @@ class DatabaseSchemas:
                     "manufacturingYear": {
                         "bsonType": "int",
                         "minimum": 1900,
-                        "maximum": 2025  # Update yearly
+                        "maximum": datetime.utcnow().year
                     },
                     "ownerInfo": {
                         "bsonType": "object",
@@ -199,7 +200,7 @@ class DatabaseSchemas:
             "centers": [
                 {"key": {"centerCode": 1}, "unique": True},
                 {"key": {"status": 1}},
-                {"key": {"address.coordinates": "2dsphere"}
+                {"key": {"address.coordinates": "2dsphere"}}
             ],
             "testSessions": [
                 {"key": {"sessionCode": 1}, "unique": True},

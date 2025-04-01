@@ -1,8 +1,9 @@
-#backend/app/core/exception.py
+# backend/app/core/exception.py
 
 from typing import Optional, Dict, Any
 from fastapi import HTTPException, status
 from datetime import datetime
+
 
 class BaseATSException(Exception):
     """Base exception class for ATS Network application."""
@@ -38,6 +39,7 @@ class BaseATSException(Exception):
             "timestamp": self.timestamp.isoformat()
         }
 
+
 class ValidationError(BaseATSException):
     """Exception for data validation errors."""
     
@@ -65,6 +67,7 @@ class ValidationError(BaseATSException):
             status_code=status.HTTP_400_BAD_REQUEST
         )
 
+
 class AuthenticationError(BaseATSException):
     """Exception for authentication failures."""
     
@@ -85,6 +88,7 @@ class AuthenticationError(BaseATSException):
             details=details,
             status_code=status.HTTP_401_UNAUTHORIZED
         )
+
 
 class AuthorizationError(BaseATSException):
     """Exception for authorization failures."""
@@ -113,6 +117,7 @@ class AuthorizationError(BaseATSException):
             status_code=status.HTTP_403_FORBIDDEN
         )
 
+
 class DatabaseError(BaseATSException):
     """Exception for database operation failures."""
     
@@ -139,6 +144,7 @@ class DatabaseError(BaseATSException):
             details=error_details,
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
 
 class TestError(BaseATSException):
     """Exception for test operation failures."""
@@ -171,6 +177,7 @@ class TestError(BaseATSException):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
+
 class CenterError(BaseATSException):
     """Exception for ATS center operation failures."""
     
@@ -198,6 +205,7 @@ class CenterError(BaseATSException):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
+
 class VehicleError(BaseATSException):
     """Exception for vehicle operation failures."""
     
@@ -224,6 +232,7 @@ class VehicleError(BaseATSException):
             details=error_details,
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
 
 class FileOperationError(BaseATSException):
     """Exception for file operation failures."""
@@ -256,6 +265,7 @@ class FileOperationError(BaseATSException):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
+
 class EmailError(BaseATSException):
     """Exception for email operation failures."""
     
@@ -287,6 +297,7 @@ class EmailError(BaseATSException):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
+
 class ReportError(BaseATSException):
     """Exception for report generation failures."""
     
@@ -313,6 +324,7 @@ class ReportError(BaseATSException):
             details=error_details,
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
 
 class ConfigurationError(BaseATSException):
     """Exception for configuration-related errors."""
@@ -341,6 +353,7 @@ class ConfigurationError(BaseATSException):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
+
 class ExternalServiceError(BaseATSException):
     """Exception for external service integration failures."""
     
@@ -366,6 +379,7 @@ class ExternalServiceError(BaseATSException):
             details=error_details,
             status_code=status.HTTP_502_BAD_GATEWAY
         )
+
 
 class RateLimitError(BaseATSException):
     """Exception for rate limit violations."""

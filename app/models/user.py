@@ -1,12 +1,15 @@
-#backend/app/models/user.py
-
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Set
-from pydantic import BaseModel, EmailStr, Field, validator
+from pydantic import BaseModel, EmailStr, Field, validator, field_validator
+from zoneinfo import ZoneInfo
 import re
+import secrets
+import logging
 
 from .common import TimestampedModel, PyObjectId
 from ..core.constants import UserRole, UserStatus
+
+logger = logging.getLogger(__name__)
 
 class UserSession(BaseModel):
     """User session tracking model."""
@@ -23,11 +26,13 @@ class UserSession(BaseModel):
     def update_activity(self) -> None:
         """Update session last activity time."""
         self.last_activity = datetime.utcnow()
+        logger.debug(f"Session {self.session_id} activity updated")
 
     def expire_session(self) -> None:
         """Mark session as expired."""
         self.is_active = False
         self.expires_at = datetime.utcnow()
+        logger.info(f"Session {self.session_id} expired")
 
 class UserPermission(BaseModel):
     """User permission definition."""
@@ -43,6 +48,12 @@ class UserPermission(BaseModel):
 class ActivityLog(BaseModel):
     """User activity tracking model."""
     
+    VALID_ACTIVITY_TYPES = [
+        "login", "logout", "password_change", "role_update", 
+        "permission_change", "profile_update", "security_action"
+    ]
+    VALID_STATUSES = ["success", "failure", "pending", "cancelled"]
+    
     activity_type: str
     timestamp: datetime
     ip_address: str
@@ -53,6 +64,18 @@ class ActivityLog(BaseModel):
     details: Dict[str, Any]
     status: str
     location_info: Optional[Dict[str, Any]]
+
+    @field_validator('activity_type')
+    def validate_activity_type(cls, v: str) -> str:
+        if v not in cls.VALID_ACTIVITY_TYPES:
+            raise ValueError(f"Invalid activity type. Must be one of: {cls.VALID_ACTIVITY_TYPES}")
+        return v
+
+    @field_validator('status')
+    def validate_status(cls, v: str) -> str:
+        if v not in cls.VALID_STATUSES:
+            raise ValueError(f"Invalid status. Must be one of: {cls.VALID_STATUSES}")
+        return v
 
 class SecurityProfile(BaseModel):
     """User security profile."""
@@ -66,6 +89,32 @@ class SecurityProfile(BaseModel):
     security_questions: List[Dict[str, str]] = []
     two_factor_enabled: bool = False
     two_factor_method: Optional[str] = None
+
+    def record_failed_login(self) -> None:
+        """Record failed login attempt."""
+        self.failed_login_attempts += 1
+        self.last_failed_login = datetime.utcnow()
+        
+        if self.failed_login_attempts >= 5:
+            self.locked_until = datetime.utcnow() + timedelta(minutes=30)
+            logger.warning(f"Account locked due to multiple failed attempts")
+
+    def reset_failed_attempts(self) -> None:
+        """Reset failed login attempts counter."""
+        self.failed_login_attempts = 0
+        self.last_failed_login = None
+        self.locked_until = None
+        logger.info("Failed login attempts reset")
+
+    def add_password_to_history(self, password_hash: str) -> None:
+        """Add password to history."""
+        self.password_history.append({
+            "hash": password_hash,
+            "created_at": datetime.utcnow()
+        })
+        if len(self.password_history) > 5:  # Keep last 5 passwords
+            self.password_history.pop(0)
+        logger.debug("Password added to history")
 
 class RoleAssignment(BaseModel):
     """User role assignment details."""
@@ -104,6 +153,21 @@ class UserCreate(BaseModel):
     state: Optional[str] = None
     pin_code: Optional[str] = None
     
+    @validator('password')
+    def validate_password_strength(cls, v: str) -> str:
+        """Validate password strength."""
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters long")
+        if not re.search(r'[A-Z]', v):
+            raise ValueError("Password must contain at least one uppercase letter")
+        if not re.search(r'[a-z]', v):
+            raise ValueError("Password must contain at least one lowercase letter")
+        if not re.search(r'\d', v):
+            raise ValueError("Password must contain at least one digit")
+        if not re.search(r'[!@#$%^&*(),.?":{}|<>]', v):
+            raise ValueError("Password must contain at least one special character")
+        return v
+
     @validator('confirm_password')
     def passwords_match(cls, v: str, values: Dict[str, Any]) -> str:
         """Validate password confirmation."""
@@ -149,14 +213,60 @@ class User(TimestampedModel):
     # Password reset
     reset_token: Optional[str] = None
     reset_token_expires: Optional[datetime] = None
-    
-    class Config:
-        """Model configuration."""
-        validate_assignment = True
-        json_encoders = {
-            datetime: lambda dt: dt.isoformat(),
-            PyObjectId: str
+
+    def get_active_session(self, session_id: str) -> Optional[UserSession]:
+        """Get active session by ID."""
+        return next(
+            (s for s in self.active_sessions 
+             if s.session_id == session_id and s.is_active),
+            None
+        )
+
+    def invalidate_all_sessions(self) -> None:
+        """Invalidate all active sessions."""
+        current_time = datetime.utcnow()
+        for session in self.active_sessions:
+            if session.is_active:
+                session.expire_session()
+        self.log_activity(
+            activity_type="security_action",
+            session_id=None,
+            details={"action": "invalidate_all_sessions"},
+            ip_address="system",
+            user_agent="system",
+            status="success"
+        )
+        logger.info(f"All sessions invalidated for user {self.email}")
+
+    def update_profile(
+        self,
+        updates: Dict[str, Any],
+        session_id: Optional[str] = None
+    ) -> None:
+        """Update user profile with tracking."""
+        old_values = {
+            k: getattr(self.profile, k)
+            for k in updates.keys()
+            if hasattr(self.profile, k)
         }
+        
+        for key, value in updates.items():
+            if hasattr(self.profile, key):
+                setattr(self.profile, key, value)
+        
+        self.log_activity(
+            activity_type="profile_update",
+            session_id=session_id,
+            details={
+                "updated_fields": list(updates.keys()),
+                "old_values": old_values,
+                "new_values": updates
+            },
+            ip_address="system",
+            user_agent="system",
+            status="success"
+        )
+        logger.info(f"Profile updated for user {self.email}")
 
     def create_session(
         self,
@@ -165,19 +275,15 @@ class User(TimestampedModel):
         device_info: Dict[str, str]
     ) -> UserSession:
         """Create new user session."""
-        # Clean expired sessions
         self.clean_expired_sessions()
         
-        # Check max sessions
         if len([s for s in self.active_sessions if s.is_active]) >= self.max_sessions:
-            # Expire oldest session
             oldest_session = sorted(
                 [s for s in self.active_sessions if s.is_active],
                 key=lambda x: x.last_activity
             )[0]
             oldest_session.expire_session()
         
-        # Create new session
         session = UserSession(
             session_id=secrets.token_urlsafe(32),
             user_agent=user_agent,
@@ -231,36 +337,11 @@ class User(TimestampedModel):
                 "old_role": old_role,
                 "new_role": new_role,
                 "updated_by": str(updated_by)
-            }
+            },
+            ip_address="system",
+            user_agent="system",
+            status="success"
         )
-
-    def add_custom_permission(
-        self,
-        permission: UserPermission
-    ) -> None:
-        """Add custom permission to user."""
-        self.role_assignment.custom_permissions.append(permission)
-
-    def has_permission(
-        self,
-        permission_name: str,
-        resource_id: Optional[str] = None
-    ) -> bool:
-        """Check if user has specific permission."""
-        # Check role-based permissions
-        if permission_name in self.role_assignment.permissions:
-            return True
-            
-        # Check custom permissions
-        for permission in self.role_assignment.custom_permissions:
-            if (
-                permission.name == permission_name and
-                (not resource_id or permission.resource_id == resource_id) and
-                (not permission.expires_at or permission.expires_at > datetime.utcnow())
-            ):
-                return True
-                
-        return False
 
     def clean_expired_sessions(self) -> None:
         """Clean up expired sessions."""
@@ -291,4 +372,12 @@ class User(TimestampedModel):
             },
             "last_active": self.last_active,
             "active_sessions": len([s for s in self.active_sessions if s.is_active])
+        }
+
+    class Config:
+        """Model configuration."""
+        validate_assignment = True
+        json_encoders = {
+            datetime: lambda dt: dt.isoformat(),
+            PyObjectId: str
         }

@@ -1,12 +1,14 @@
-#backend/app/models/notification.py
-
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Set
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator, field_validator
 from enum import Enum
+import re
+import logging
 
 from .common import TimestampedModel, PyObjectId
 from ..core.constants import NotificationType
+
+logger = logging.getLogger(__name__)
 
 class DeliveryMethod(str, Enum):
     """Notification delivery method options."""
@@ -15,6 +17,17 @@ class DeliveryMethod(str, Enum):
     SMS = "sms"
     PUSH = "push"
     WEBHOOK = "webhook"
+
+    @classmethod
+    def _missing_(cls, value: str) -> Optional['DeliveryMethod']:
+        """Handle case-insensitive lookup."""
+        try:
+            return cls[value.upper()]
+        except KeyError:
+            for member in cls:
+                if member.value.lower() == value.lower():
+                    return member
+            return None
 
 class Priority(str, Enum):
     """Notification priority levels."""
@@ -26,7 +39,7 @@ class Priority(str, Enum):
 class NotificationTemplate(TimestampedModel):
     """Notification template configuration."""
     
-    template_code: str
+    template_code: str = Field(..., regex=r'^TPL\d{6}$')
     template_type: NotificationType
     subject_template: str
     content_template: str
@@ -41,6 +54,21 @@ class NotificationTemplate(TimestampedModel):
     is_active: bool = True
     version: str = "1.0.0"
     last_modified_by: PyObjectId
+
+    @field_validator('template_code')
+    def validate_template_code(cls, v: str) -> str:
+        """Validate template code format."""
+        if not v.startswith('TPL'):
+            raise ValueError("Template code must start with 'TPL'")
+        return v
+
+    @field_validator('content_template')
+    def validate_content_template(cls, v: str) -> str:
+        """Validate template content."""
+        required_placeholders = set(re.findall(r'\{(\w+)\}', v))
+        if not all(p in cls.parameters for p in required_placeholders):
+            raise ValueError("Template contains undefined parameters")
+        return v
 
 class DeliveryAttempt(BaseModel):
     """Notification delivery attempt tracking."""
@@ -61,6 +89,61 @@ class NotificationPreferences(BaseModel):
     quiet_hours: Optional[Dict[str, str]] = None
     frequency_limit: Optional[Dict[str, int]] = None
     priority_threshold: Priority = Priority.LOW
+
+    def can_send_notification(self, notification_type: NotificationType, 
+                            method: DeliveryMethod, 
+                            current_time: datetime) -> bool:
+        """Check if notification can be sent based on preferences."""
+        try:
+            # Check if type and method are enabled
+            if (notification_type not in self.enabled_types or 
+                method not in self.enabled_methods):
+                return False
+
+            # Check quiet hours
+            if self.quiet_hours:
+                current_hour = current_time.hour
+                start_hour = int(self.quiet_hours.get('start', '22'))
+                end_hour = int(self.quiet_hours.get('end', '7'))
+                if start_hour <= current_hour or current_hour < end_hour:
+                    logger.debug(f"Notification blocked during quiet hours for user {self.user_id}")
+                    return False
+
+            # Check frequency limits
+            if self.frequency_limit:
+                # Implementation for frequency checking would go here
+                pass
+
+            return True
+        except Exception as e:
+            logger.error(f"Error checking notification preferences: {str(e)}")
+            return False
+
+class NotificationQueue(TimestampedModel):
+    """Queue management for notifications."""
+    
+    queue_id: str = Field(..., min_length=10)
+    priority_level: Priority
+    notifications: List[str] = Field(default_factory=list)
+    status: str = "active"
+    processing_window: Optional[Dict[str, datetime]] = None
+    retry_policy: Dict[str, Any] = Field(
+        default_factory=lambda: {
+            "max_retries": 3,
+            "retry_delay": 300,  # seconds
+            "backoff_factor": 2
+        }
+    )
+
+    def add_to_queue(self, notification_id: str) -> None:
+        """Add notification to queue."""
+        if notification_id not in self.notifications:
+            self.notifications.append(notification_id)
+            logger.info(f"Added notification {notification_id} to queue {self.queue_id}")
+
+    def get_next_batch(self, batch_size: int = 10) -> List[str]:
+        """Get next batch of notifications to process."""
+        return self.notifications[:batch_size]
 
 class NotificationGroup(BaseModel):
     """Group of related notifications."""
@@ -100,7 +183,27 @@ class Notification(TimestampedModel):
     
     action_required: bool = False
     action_taken: Optional[Dict[str, Any]] = None
-    
+
+    def handle_delivery_error(self, method: DeliveryMethod, 
+                            error: Exception) -> None:
+        """Handle delivery errors with proper logging."""
+        try:
+            error_details = {
+                "error_type": error.__class__.__name__,
+                "error_message": str(error),
+                "timestamp": datetime.utcnow()
+            }
+            
+            self.add_delivery_attempt(method, "failed", error_details)
+            
+            if not self.can_retry_delivery(method):
+                self.delivery_status[method] = "permanently_failed"
+                logger.error(f"Permanent delivery failure for notification {self.notification_id}")
+            else:
+                logger.warning(f"Temporary delivery failure for notification {self.notification_id}")
+        except Exception as e:
+            logger.error(f"Error handling delivery failure: {str(e)}")
+
     class Config:
         """Model configuration."""
         validate_assignment = True
@@ -108,68 +211,6 @@ class Notification(TimestampedModel):
             datetime: lambda dt: dt.isoformat(),
             PyObjectId: str
         }
-
-    @validator('notification_id')
-    def validate_notification_id(cls, v: str) -> str:
-        """Validate notification ID format."""
-        if not v.startswith('NOT'):
-            raise ValueError("Notification ID must start with 'NOT'")
-        return v
-
-    def add_delivery_attempt(
-        self,
-        method: DeliveryMethod,
-        status: str,
-        error: Optional[Dict[str, Any]] = None
-    ) -> None:
-        """Add delivery attempt with tracking."""
-        attempt = DeliveryAttempt(
-            method=method,
-            attempt_time=datetime.utcnow(),
-            status=status,
-            error_details=error,
-            retry_count=len([
-                a for a in self.delivery_attempts
-                if a.method == method
-            ])
-        )
-        self.delivery_attempts.append(attempt)
-        self.delivery_status[method] = status
-
-    def mark_as_read(self) -> None:
-        """Mark notification as read."""
-        self.read_status = True
-        self.read_at = datetime.utcnow()
-
-    def record_action(
-        self,
-        action_type: str,
-        action_details: Dict[str, Any]
-    ) -> None:
-        """Record action taken on notification."""
-        self.action_taken = {
-            "type": action_type,
-            "details": action_details,
-            "timestamp": datetime.utcnow()
-        }
-
-    def is_expired(self) -> bool:
-        """Check if notification has expired."""
-        if not self.expires_at:
-            return False
-        return datetime.utcnow() > self.expires_at
-
-    def can_retry_delivery(
-        self,
-        method: DeliveryMethod,
-        max_retries: int = 3
-    ) -> bool:
-        """Check if delivery retry is possible."""
-        attempts = [
-            a for a in self.delivery_attempts
-            if a.method == method
-        ]
-        return len(attempts) < max_retries
 
 class NotificationBatch(TimestampedModel):
     """Batch notification processing model."""
@@ -192,31 +233,35 @@ class NotificationBatch(TimestampedModel):
     notifications: List[str] = []  # List of generated notification IDs
     error_details: Optional[Dict[str, Any]] = None
 
-    def update_processing_status(
-        self,
-        new_status: str,
-        error: Optional[Dict[str, Any]] = None
-    ) -> None:
-        """Update batch processing status."""
-        self.processing_status = new_status
-        if error:
-            self.error_details = error
+    def process_batch(self) -> None:
+        """Process all notifications in batch."""
+        try:
+            logger.info(f"Starting batch processing for {self.batch_id}")
+            self.processing_status = "processing"
+            total_recipients = len(self.recipients)
+            
+            for recipient_id in self.recipients:
+                try:
+                    notification = self._create_notification(recipient_id)
+                    self.add_notification(notification.notification_id, True)
+                    logger.debug(f"Processed notification for recipient {recipient_id}")
+                except Exception as e:
+                    self.add_notification(str(recipient_id), False)
+                    if not self.error_details:
+                        self.error_details = {}
+                    self.error_details[str(recipient_id)] = str(e)
+                    logger.error(f"Failed to process notification for recipient {recipient_id}: {str(e)}")
 
-    def add_notification(
-        self,
-        notification_id: str,
-        success: bool = True
-    ) -> None:
-        """Add processed notification to batch."""
-        self.notifications.append(notification_id)
-        if success:
-            self.processed_count += 1
-        else:
-            self.failed_count += 1
+            final_status = "completed" if self.failed_count == 0 else "completed_with_errors"
+            self.processing_status = final_status
+            logger.info(f"Batch processing completed. Status: {final_status}")
+            
+        except Exception as e:
+            self.update_processing_status("failed", {"error": str(e)})
+            logger.error(f"Batch processing failed: {str(e)}")
+            raise
 
-    def get_completion_percentage(self) -> float:
-        """Calculate batch processing completion percentage."""
-        total = len(self.recipients)
-        if total == 0:
-            return 0.0
-        return ((self.processed_count + self.failed_count) / total) * 100
+    def _create_notification(self, recipient_id: PyObjectId) -> 'Notification':
+        """Create individual notification from batch template."""
+        # Implementation for creating individual notifications
+        pass

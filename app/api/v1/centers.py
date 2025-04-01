@@ -7,7 +7,7 @@ from datetime import datetime
 from bson import ObjectId
 
 from ...core.auth.permissions import (
-    RolePermission, 
+    RolePermission,
     require_permission,
     check_center_access
 )
@@ -17,8 +17,8 @@ from ...services.location.service import location_service
 from ...services.s3.service import s3_service
 from ...services.notification.service import notification_service
 from ...models.center import (
-    CenterCreate, 
-    CenterUpdate, 
+    CenterCreate,
+    CenterUpdate,
     CenterResponse,
     CenterStatistics,
     CenterEquipment
@@ -33,22 +33,10 @@ router = APIRouter()
 async def create_center(
     center_data: CenterCreate,
     documents: List[UploadFile] = File(...),
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.MANAGE_CENTERS))
 ) -> CenterResponse:
-    """Create a new ATS center with proper validation and location handling.
-    
-    Args:
-        center_data: Center creation details
-        documents: Required center documentation
-        current_user: Authenticated user
-        
-    Returns:
-        Created center information
-        
-    Raises:
-        HTTPException: If creation fails or validation errors occur
-    """
+    """Create a new ATS center with proper validation and location handling."""
     try:
         # Validate center code uniqueness
         if await center_service.get_center_by_code(center_data.center_code):
@@ -116,25 +104,9 @@ async def get_centers(
     longitude: Optional[float] = None,
     radius: Optional[float] = None,
     status: Optional[str] = None,
-    current_user = Depends(get_current_user)
+    current_user=Depends(get_current_user)
 ) -> List[CenterResponse]:
-    """Get centers based on various search criteria with role-based filtering.
-    
-    Args:
-        state: Optional state filter
-        city: Optional city filter
-        latitude: Optional search latitude
-        longitude: Optional search longitude
-        radius: Optional search radius in km
-        status: Optional center status filter
-        current_user: Authenticated user
-        
-    Returns:
-        List of matching centers based on user's role
-        
-    Raises:
-        HTTPException: If retrieval fails
-    """
+    """Get centers based on various search criteria with role-based filtering."""
     try:
         # Handle location-based search
         if all([latitude, longitude, radius]):
@@ -184,20 +156,9 @@ async def get_centers(
 @router.get("/{center_id}", response_model=CenterResponse)
 async def get_center(
     center_id: str,
-    current_user = Depends(get_current_user)
+    current_user=Depends(get_current_user)
 ) -> CenterResponse:
-    """Get detailed center information with role-based access control.
-    
-    Args:
-        center_id: ID of center to retrieve
-        current_user: Authenticated user
-        
-    Returns:
-        Center details
-        
-    Raises:
-        HTTPException: If retrieval fails or access denied
-    """
+    """Get detailed center information with role-based access control."""
     try:
         # Check access permission
         if not await check_center_access(current_user, center_id):
@@ -232,22 +193,10 @@ async def get_center(
 async def update_center(
     center_id: str,
     updates: CenterUpdate,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.MANAGE_CENTERS))
 ) -> CenterResponse:
-    """Update center information with proper validation.
-    
-    Args:
-        center_id: ID of center to update
-        updates: Updated center information
-        current_user: Authenticated user
-        
-    Returns:
-        Updated center information
-        
-    Raises:
-        HTTPException: If update fails or access denied
-    """
+    """Update center information with proper validation."""
     try:
         # Verify access permission
         if not await check_center_access(current_user, center_id):
@@ -292,22 +241,10 @@ async def update_center(
 async def update_equipment(
     center_id: str,
     equipment: CenterEquipment,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.MANAGE_CENTER_EQUIPMENT))
 ) -> CenterResponse:
-    """Update center equipment information.
-    
-    Args:
-        center_id: ID of center
-        equipment: Equipment information to update
-        current_user: Authenticated user
-        
-    Returns:
-        Updated center information
-        
-    Raises:
-        HTTPException: If update fails or access denied
-    """
+    """Update center equipment information."""
     try:
         # Verify access permission
         if not await check_center_access(current_user, center_id):
@@ -342,23 +279,10 @@ async def get_center_statistics(
     center_id: str,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.VIEW_CENTER_STATS))
 ) -> CenterStatistics:
-    """Get comprehensive center statistics.
-    
-    Args:
-        center_id: ID of center
-        start_date: Optional start date for statistics
-        end_date: Optional end date for statistics
-        current_user: Authenticated user
-        
-    Returns:
-        Center statistics
-        
-    Raises:
-        HTTPException: If retrieval fails or access denied
-    """
+    """Get comprehensive center statistics."""
     try:
         # Verify access permission
         if not await check_center_access(current_user, center_id):

@@ -1,12 +1,13 @@
 # backend/app/api/v1/auth.py
 
-from fastapi import APIRouter, Depends, HTTPException, status, Response, File, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, status, Response, File, UploadFile, Cookie, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from typing import List, Optional, Dict, Any
 import logging
 from datetime import datetime
 import aioredis
 import secrets
+from pydantic import BaseModel, EmailStr, Field
 
 from ...core.auth.token import token_service
 from ...core.auth.rate_limit import rate_limiter
@@ -28,24 +29,31 @@ redis = aioredis.from_url(
     decode_responses=True
 )
 
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(..., description="Password reset token")
+    new_password: str = Field(..., min_length=8, description="New password with at least 8 characters")
+
+class RegisterUserRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(..., min_length=8, description="Password with at least 8 characters")
+    full_name: str = Field(..., max_length=100, description="Full name of the user")
+    ats_name: str
+    ats_address: str
+    city: str
+    state: str
+    pin_code: str
+    phone: str
+
 @router.post("/register", response_model=UserResponse)
 @rate_limiter.limit("5/minute")  # Rate limit registration attempts
 async def register_user(
-    user_data: UserCreate,
+    user_data: RegisterUserRequest,
     documents: List[UploadFile] = File(...)
 ) -> UserResponse:
-    """Register a new ATS center user with document verification.
-    
-    Args:
-        user_data: Complete user registration data
-        documents: Required verification documents
-        
-    Returns:
-        Registration status and user information
-        
-    Raises:
-        HTTPException: If registration fails or validation errors occur
-    """
+    """Register a new ATS center user with document verification."""
     try:
         # Validate email uniqueness
         if await user_service.get_user_by_email(user_data.email):
@@ -61,16 +69,13 @@ async def register_user(
                 detail=f"Required {settings.required_document_count} documents"
             )
 
-        # Upload documents to S3 with proper organization
         document_urls = {}
         for doc in documents:
-            # Validate file type and size
             if not s3_service.validate_document(doc):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Invalid document format: {doc.filename}"
                 )
-
             url = await s3_service.upload_document(
                 file=doc,
                 folder=f"users/{user_data.email}/registration",
@@ -82,10 +87,8 @@ async def register_user(
             )
             document_urls[doc.filename] = url
 
-        # Hash password securely
         hashed_password = get_password_hash(user_data.password)
 
-        # Create user with pending status
         user = await user_service.create_user(
             email=user_data.email,
             password_hash=hashed_password,
@@ -102,14 +105,12 @@ async def register_user(
             verification_token=secrets.token_urlsafe(32)
         )
 
-        # Send verification email
         await email_service.send_registration_pending(
             email=user.email,
             name=user.full_name,
             center_name=user_data.ats_name
         )
 
-        # Log successful registration
         logger.info(f"New user registered: {user.email}")
 
         return UserResponse(
@@ -123,7 +124,6 @@ async def register_user(
         raise
     except Exception as e:
         logger.error(f"Registration error: {str(e)}")
-        # Don't expose internal errors
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Registration failed. Please try again later."
@@ -135,20 +135,8 @@ async def login(
     response: Response,
     form_data: OAuth2PasswordRequestForm = Depends()
 ) -> TokenResponse:
-    """Authenticate user and provide access tokens.
-    
-    Args:
-        response: FastAPI response object for setting cookies
-        form_data: Login credentials
-        
-    Returns:
-        Access token and user information
-        
-    Raises:
-        HTTPException: If authentication fails
-    """
+    """Authenticate user and provide access tokens."""
     try:
-        # Get user and verify status
         user = await user_service.get_user_by_email(form_data.username)
         if not user:
             raise HTTPException(
@@ -156,7 +144,6 @@ async def login(
                 detail="Invalid credentials"
             )
 
-        # Check account status
         if not user.is_active:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -169,16 +156,13 @@ async def login(
                 detail="Account pending approval"
             )
 
-        # Verify password
         if not verify_password(form_data.password, user.hashed_password):
-            # Log failed attempt
             await user_service.log_failed_login(user.id)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid credentials"
             )
 
-        # Create tokens
         access_token, refresh_token = await token_service.create_tokens(
             user_id=str(user.id),
             user_data={
@@ -188,7 +172,6 @@ async def login(
             }
         )
 
-        # Set secure refresh token cookie
         response.set_cookie(
             key=settings.refresh_token_cookie_name,
             value=refresh_token,
@@ -199,10 +182,8 @@ async def login(
             domain=settings.cookie_domain
         )
 
-        # Update last login
         await user_service.update_last_login(user.id)
 
-        # Log successful login
         logger.info(f"User logged in: {user.email}")
 
         return TokenResponse(
@@ -228,20 +209,9 @@ async def login(
         )
 
 @router.post("/refresh")
-async def refresh_token(response: Response) -> Dict[str, str]:
-    """Refresh access token using refresh token cookie.
-    
-    Args:
-        response: FastAPI response object for updating cookie
-        
-    Returns:
-        New access token
-        
-    Raises:
-        HTTPException: If token refresh fails
-    """
+async def refresh_token(request: Request, response: Response) -> Dict[str, str]:
+    """Refresh access token using refresh token cookie."""
     try:
-        # Get refresh token from cookie
         refresh_token = request.cookies.get(settings.refresh_token_cookie_name)
         if not refresh_token:
             raise HTTPException(
@@ -249,12 +219,10 @@ async def refresh_token(response: Response) -> Dict[str, str]:
                 detail="No refresh token"
             )
 
-        # Validate and refresh tokens
         new_access_token, new_refresh_token = await token_service.refresh_tokens(
             refresh_token
         )
 
-        # Update refresh token cookie
         response.set_cookie(
             key=settings.refresh_token_cookie_name,
             value=new_refresh_token,
@@ -274,121 +242,16 @@ async def refresh_token(response: Response) -> Dict[str, str]:
             detail="Failed to refresh token"
         )
 
-@router.post("/logout", response_model=Dict[str, str])
-async def logout(
-    current_user = Depends(get_current_user),
-    response: Response = None,
-    refresh_token: Optional[str] = Cookie(None, alias=settings.REFRESH_TOKEN_COOKIE_NAME)
-) -> Dict[str, str]:
-    """Logout user and invalidate all active tokens."""
-    try:
-        db = await get_database()
-        
-        # Invalidate current session
-        if refresh_token:
-            await token_service.invalidate_token(refresh_token)
-        
-        # Clear refresh token cookie
-        if response:
-            response.delete_cookie(
-                key=settings.REFRESH_TOKEN_COOKIE_NAME,
-                httponly=True,
-                secure=settings.COOKIE_SECURE,
-                samesite=settings.COOKIE_SAMESITE,
-                domain=settings.COOKIE_DOMAIN
-            )
-        
-        # Update user's last logout time
-        await db.users.update_one(
-            {"_id": ObjectId(current_user.id)},
-            {
-                "$set": {
-                    "last_logout": datetime.utcnow(),
-                    "updated_at": datetime.utcnow()
-                }
-            }
-        )
-        
-        # Invalidate all active sessions for the user
-        await token_service.invalidate_all_user_tokens(str(current_user.id))
-        
-        # Log logout event
-        await audit_service.log_activity(
-            user_id=str(current_user.id),
-            action="logout",
-            entity_type="user",
-            entity_id=str(current_user.id),
-            metadata={
-                "ip_address": request.client.host,
-                "user_agent": request.headers.get("user-agent")
-            }
-        )
-        
-        return {
-            "status": "success",
-            "message": "Successfully logged out"
-        }
-        
-    except Exception as e:
-        logger.error(f"Logout error: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to complete logout"
-        )
-
-
-@router.post("/verify-email/{token}")
-async def verify_email(token: str) -> Dict[str, str]:
-    """Verify user email address.
-    
-    Args:
-        token: Email verification token
-        
-    Returns:
-        Success message
-        
-    Raises:
-        HTTPException: If verification fails
-    """
-    try:
-        user = await user_service.verify_email(token)
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid verification token"
-            )
-
-        return {"message": "Email verified successfully"}
-
-    except Exception as e:
-        logger.error(f"Email verification error: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Verification failed"
-        )
-
 @router.post("/forgot-password")
 @rate_limiter.limit("3/minute")  # Strict rate limit for password reset
-async def forgot_password(email: str) -> Dict[str, str]:
-    """Initiate password reset process.
-    
-    Args:
-        email: User's email address
-        
-    Returns:
-        Success message
-        
-    Raises:
-        HTTPException: If process fails
-    """
+async def forgot_password(request: ForgotPasswordRequest) -> Dict[str, str]:
+    """Initiate password reset process."""
     try:
-        user = await user_service.get_user_by_email(email)
+        user = await user_service.get_user_by_email(request.email)
         if user:
-            # Generate and save reset token
             reset_token = secrets.token_urlsafe(32)
             await user_service.save_reset_token(user.id, reset_token)
 
-            # Send reset email
             await email_service.send_password_reset(
                 email=user.email,
                 name=user.full_name,
@@ -407,36 +270,20 @@ async def forgot_password(email: str) -> Dict[str, str]:
             detail="Failed to process request"
         )
 
-@router.post("/reset-password/{token}")
-async def reset_password(
-    token: str,
-    new_password: str
-) -> Dict[str, str]:
-    """Reset user password with token.
-    
-    Args:
-        token: Password reset token
-        new_password: New password
-        
-    Returns:
-        Success message
-        
-    Raises:
-        HTTPException: If reset fails
-    """
+@router.post("/reset-password")
+async def reset_password(request: ResetPasswordRequest) -> Dict[str, str]:
+    """Reset user password with token."""
     try:
-        user = await user_service.verify_reset_token(token)
+        user = await user_service.verify_reset_token(request.token)
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid or expired reset token"
             )
 
-        # Update password
-        hashed_password = get_password_hash(new_password)
+        hashed_password = get_password_hash(request.new_password)
         await user_service.update_password(user.id, hashed_password)
 
-        # Invalidate all existing sessions
         await token_service.invalidate_all_user_tokens(str(user.id))
 
         return {"message": "Password reset successful"}
@@ -446,67 +293,4 @@ async def reset_password(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Password reset failed"
-        )
-
-@router.post("/token/revoke/{token_id}", response_model=Dict[str, str])
-async def revoke_token(
-    token_id: str,
-    current_user = Depends(get_current_user),
-    _=Depends(require_permission(RolePermission.MANAGE_TOKENS))
-) -> Dict[str, str]:
-    """Revoke specific token."""
-    try:
-        await token_service.revoke_token(token_id)
-        
-        await audit_service.log_activity(
-            user_id=str(current_user.id),
-            action="revoke_token",
-            entity_type="token",
-            entity_id=token_id,
-            metadata={
-                "revoked_at": datetime.utcnow().isoformat()
-            }
-        )
-        
-        return {
-            "status": "success",
-            "message": "Token revoked successfully"
-        }
-        
-    except Exception as e:
-        logger.error(f"Token revocation error: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to revoke token"
-        )
-
-@router.post("/token/revoke-all", response_model=Dict[str, str])
-async def revoke_all_tokens(
-    current_user = Depends(get_current_user),
-    _=Depends(require_permission(RolePermission.MANAGE_TOKENS))
-) -> Dict[str, str]:
-    """Revoke all active tokens for a user."""
-    try:
-        await token_service.invalidate_all_user_tokens(str(current_user.id))
-        
-        await audit_service.log_activity(
-            user_id=str(current_user.id),
-            action="revoke_all_tokens",
-            entity_type="user",
-            entity_id=str(current_user.id),
-            metadata={
-                "revoked_at": datetime.utcnow().isoformat()
-            }
-        )
-        
-        return {
-            "status": "success",
-            "message": "All tokens revoked successfully"
-        }
-        
-    except Exception as e:
-        logger.error(f"Token revocation error: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to revoke tokens"
         )

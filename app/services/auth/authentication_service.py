@@ -1,17 +1,16 @@
-# backend/app/services/auth/authentication_service.py
-
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, Callable
 import logging
 import jwt
 import bcrypt
 import redis
 import secrets
-from fastapi import HTTPException, status
+from fastapi import HTTPException, status, Request
 from bson import ObjectId
 
 from ...core.security import SecurityManager
 from ...core.auth.token import TokenService
+from ...core.exceptions import RateLimitError
 from ...services.email.email_service import EmailService
 from ...services.s3.s3_service import S3Service
 from ...database import get_database, database_transaction
@@ -20,7 +19,48 @@ from ...config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+class RateLimiter:
+    """Handle rate limiting for authentication attempts."""
+    
+    def __init__(self):
+        self.redis = redis.Redis(
+            host=settings.redis_host,
+            port=settings.redis_port,
+            password=settings.redis_password,
+            decode_responses=True
+        )
+    
+    async def check_rate_limit(self, key: str, action: str) -> bool:
+        """Check if rate limit is exceeded."""
+        attempts_key = f"ratelimit:{action}:{key}"
+        lockout_key = f"lockout:{action}:{key}"
+        
+        if await self.redis.get(lockout_key):
+            return False
+        
+        attempts = int(await self.redis.get(attempts_key) or 0)
+        return attempts < settings.MAX_ATTEMPTS[action]
+    
+    async def increment_attempts(self, key: str, action: str) -> None:
+        """Increment attempt counter and handle lockout."""
+        attempts_key = f"ratelimit:{action}:{key}"
+        lockout_key = f"lockout:{action}:{key}"
+        
+        pipe = self.redis.pipeline()
+        pipe.incr(attempts_key)
+        pipe.expire(attempts_key, settings.RATE_LIMIT_WINDOW)
+        attempts = (await pipe.execute())[0]
+        
+        if attempts >= settings.MAX_ATTEMPTS[action]:
+            await self.redis.setex(
+                lockout_key,
+                settings.LOCKOUT_DURATION,
+                1
+            )
+
 class AuthenticationService:
+    """Service for managing authentication and session handling."""
+    
     def __init__(self):
         """Initialize authentication service with required components."""
         self.security = SecurityManager()
@@ -36,223 +76,208 @@ class AuthenticationService:
             decode_responses=True
         )
         
-        # Rate limiting settings
+        # Settings
         self.max_login_attempts = 5
         self.lockout_duration = 1800  # 30 minutes
         self.rate_limit_window = 3600  # 1 hour
-        
-        # Token settings
         self.access_token_expires = timedelta(minutes=30)
         self.refresh_token_expires = timedelta(days=7)
         
         logger.info("Authentication service initialized with enhanced security")
 
-    async def register_user(
-        self,
-        user_data: Dict[str, Any],
-        documents: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Handle user registration with enhanced security and validation."""
-        async with database_transaction() as session:
-            try:
-                db = await get_database()
-                
-                # Check email uniqueness
-                if await db.users.find_one({"email": user_data["email"]}):
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Email already registered"
-                    )
-                
-                # Process and store documents
-                document_urls = await self._process_registration_documents(
-                    user_data["email"],
-                    documents
-                )
-                
-                # Hash password securely
-                password_hash = await self.security.hash_password(
-                    user_data["password"]
-                )
-                
-                # Create verification token
-                verification_token = secrets.token_urlsafe(32)
-                
-                # Create user record
-                user_record = {
-                    "email": user_data["email"],
-                    "passwordHash": password_hash,
-                    "firstName": user_data["firstName"],
-                    "lastName": user_data["lastName"],
-                    "phoneNumber": user_data["phoneNumber"],
-                    "role": "pending",
-                    "status": "pending",
-                    "atsCenter": {
-                        "name": user_data["centerName"],
-                        "address": user_data["address"],
-                        "city": user_data["city"],
-                        "district": user_data["district"],
-                        "state": user_data["state"],
-                        "pinCode": user_data["pinCode"],
-                        "coordinates": None  # Will be updated after verification
-                    },
-                    "documents": document_urls,
-                    "verificationToken": verification_token,
-                    "verificationExpires": datetime.utcnow() + timedelta(days=7),
-                    "isActive": True,
-                    "isVerified": False,
-                    "createdAt": datetime.utcnow(),
-                    "updatedAt": datetime.utcnow()
-                }
-                
-                # Insert with transaction
-                result = await db.users.insert_one(user_record, session=session)
-                user_record["_id"] = result.inserted_id
-                
-                # Send verification email
-                await self.email_service.send_registration_pending(
-                    email=user_data["email"],
-                    name=f"{user_data['firstName']} {user_data['lastName']}",
-                    center_name=user_data["centerName"]
-                )
-                
-                logger.info(f"Registered new user: {user_data['email']}")
-                return {"id": str(result.inserted_id), "status": "pending"}
-                
-            except Exception as e:
-                logger.error(f"Registration error: {str(e)}")
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Registration failed"
-                )
-
-    async def authenticate_user(
-        self,
-        email: str,
-        password: str,
-        client_ip: str
-    ) -> Dict[str, Any]:
-        """Authenticate user with rate limiting and security measures."""
+    async def login(self, email: str, password: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Authenticate user and create session."""
         try:
-            # Check rate limiting
-            if await self._is_rate_limited(client_ip):
+            db = await get_database()
+            
+            if not await rate_limiter.check_rate_limit(email, 'login'):
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     detail="Too many login attempts"
                 )
-                
-            db = await get_database()
             
-            # Get user and verify credentials
             user = await db.users.find_one({"email": email})
-            if not user or not self.security.verify_password(
-                password,
-                user["passwordHash"]
-            ):
-                await self._handle_failed_login(email, client_ip)
+            if not user:
+                await rate_limiter.increment_attempts(email, 'login')
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid credentials"
                 )
             
-            # Check account status
-            if not user["isActive"]:
+            if not self.security.verify_password(password, user["password"]):
+                await rate_limiter.increment_attempts(email, 'login')
                 raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Account is inactive"
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid credentials"
                 )
             
-            if user["status"] != "approved":
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Account pending approval"
-                )
+            session = await self.create_session(str(user["_id"]), metadata)
             
-            # Generate tokens
-            access_token, refresh_token = await self.token_service.create_tokens(
-                str(user["_id"]),
+            access_token = self.token_service.create_access_token(
+                data={"sub": str(user["_id"])},
+                expires_delta=self.access_token_expires
+            )
+            refresh_token = self.token_service.create_refresh_token(
+                data={"sub": str(user["_id"])},
+                expires_delta=self.refresh_token_expires
+            )
+            
+            return {
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "session_id": session["sessionId"],
+                "token_type": "bearer"
+            }
+            
+        except Exception as e:
+            logger.error(f"Login error: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Login failed"
+            )
+
+    async def logout(self, access_token: str, refresh_token: str, session_id: str) -> Dict[str, Any]:
+        """Handle user logout and cleanup."""
+        try:
+            db = await get_database()
+            
+            await db.sessions.update_one(
+                {"sessionId": session_id},
                 {
-                    "role": user["role"],
-                    "permissions": user.get("permissions", []),
-                    "center_id": str(user["atsCenter"]["_id"]) if "atsCenter" in user else None
+                    "$set": {
+                        "isActive": False,
+                        "endedAt": datetime.utcnow()
+                    }
                 }
             )
             
-            # Update last login and reset failed attempts
+            await self._blacklist_token(access_token, "access")
+            await self._blacklist_token(refresh_token, "refresh")
+            
+            return {"status": "success", "message": "Logged out successfully"}
+            
+        except Exception as e:
+            logger.error(f"Logout error: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Logout failed"
+            )
+
+    async def request_password_reset(self, email: str) -> Dict[str, Any]:
+        """Request password reset with rate limiting and token generation."""
+        try:
+            if not await rate_limiter.check_rate_limit(email, 'password_reset'):
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many reset attempts"
+                )
+
+            db = await get_database()
+            user = await db.users.find_one({"email": email})
+            
+            if not user:
+                return {"status": "success", "message": "Reset instructions sent"}
+            
+            reset_token = secrets.token_urlsafe(32)
+            reset_expires = datetime.utcnow() + timedelta(hours=1)
+            
             await db.users.update_one(
                 {"_id": user["_id"]},
                 {
                     "$set": {
-                        "lastLogin": datetime.utcnow(),
-                        "loginAttempts": 0,
+                        "resetToken": reset_token,
+                        "resetTokenExpires": reset_expires,
                         "updatedAt": datetime.utcnow()
                     }
                 }
             )
             
-            # Clear rate limiting
-            await self._clear_rate_limit(client_ip)
+            await self.email_service.send_password_reset(
+                email=user["email"],
+                name=f"{user['firstName']} {user['lastName']}",
+                reset_token=reset_token
+            )
             
-            return {
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-                "user": self._format_user_response(user)
-            }
+            return {"status": "success", "message": "Reset instructions sent"}
             
-        except HTTPException:
-            raise
         except Exception as e:
-            logger.error(f"Authentication error: {str(e)}")
+            logger.error(f"Password reset request error: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Authentication failed"
+                detail="Failed to process reset request"
             )
 
-    async def refresh_token(
-        self,
-        refresh_token: str
-    ) -> Dict[str, str]:
-        """Refresh access token using refresh token."""
+    async def verify_reset_token(self, reset_token: str, new_password: str) -> Dict[str, Any]:
+        """Verify and process password reset."""
         try:
-            # Verify refresh token
-            payload = await self.token_service.verify_token(
-                refresh_token,
-                token_type="refresh"
-            )
-            
-            # Check if token is blacklisted
-            if await self._is_token_blacklisted(refresh_token):
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Token has been revoked"
-                )
-            
-            # Get user data
             db = await get_database()
-            user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
             
-            if not user or not user["isActive"]:
+            user = await db.users.find_one({
+                "resetToken": reset_token,
+                "resetTokenExpires": {"$gt": datetime.utcnow()}
+            })
+            
+            if not user:
                 raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="User inactive or not found"
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid or expired reset token"
                 )
             
-            # Generate new tokens
-            new_access_token, new_refresh_token = await self.token_service.create_tokens(
-                str(user["_id"]),
+            hashed_password = self.security.hash_password(new_password)
+            
+            await db.users.update_one(
+                {"_id": user["_id"]},
                 {
-                    "role": user["role"],
-                    "permissions": user.get("permissions", []),
-                    "center_id": str(user["atsCenter"]["_id"]) if "atsCenter" in user else None
+                    "$set": {
+                        "password": hashed_password,
+                        "updatedAt": datetime.utcnow()
+                    },
+                    "$unset": {
+                        "resetToken": "",
+                        "resetTokenExpires": ""
+                    }
                 }
             )
             
-            # Blacklist old refresh token
-            await self._blacklist_token(refresh_token)
+            await db.sessions.update_many(
+                {"userId": user["_id"]},
+                {
+                    "$set": {
+                        "isActive": False,
+                        "endedAt": datetime.utcnow()
+                    }
+                }
+            )
+            
+            return {"status": "success", "message": "Password reset successful"}
+            
+        except Exception as e:
+            logger.error(f"Password reset verification error: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to reset password"
+            )
+
+    async def refresh_token(self, refresh_token: str) -> Dict[str, Any]:
+        """Generate new access token using refresh token."""
+        try:
+            payload = await self.verify_token(refresh_token, "refresh")
+            user_id = payload.get("sub")
+            
+            if not user_id:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid refresh token"
+                )
+                
+            access_token = self.token_service.create_access_token(
+                data={"sub": user_id},
+                expires_delta=self.access_token_expires
+            )
             
             return {
-                "access_token": new_access_token,
-                "refresh_token": new_refresh_token
+                "access_token": access_token,
+                "token_type": "bearer"
             }
             
         except Exception as e:
@@ -262,286 +287,178 @@ class AuthenticationService:
                 detail="Failed to refresh token"
             )
 
-    async def _process_registration_documents(
-        self,
-        email: str,
-        documents: Dict[str, Any]
-    ) -> Dict[str, str]:
-        """Process and store registration documents securely."""
+    async def create_session(self, user_id: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Create and track user session."""
         try:
-            document_urls = {}
-            for doc_type, file in documents.items():
-                url = await self.s3_service.upload_document(
-                    file=file,
-                    folder=f"users/{email}/registration",
-                    metadata={
-                        "user_email": email,
-                        "document_type": doc_type
-                    }
-                )
-                document_urls[doc_type] = url
-            return document_urls
+            db = await get_database()
+            
+            session = {
+                "userId": ObjectId(user_id),
+                "sessionId": secrets.token_urlsafe(32),
+                "userAgent": metadata.get("userAgent"),
+                "ipAddress": metadata.get("ipAddress"),
+                "lastActivity": datetime.utcnow(),
+                "isActive": True,
+                "expiresAt": datetime.utcnow() + timedelta(days=1)
+            }
+            
+            await db.sessions.insert_one(session)
+            return {"sessionId": session["sessionId"]}
             
         except Exception as e:
-            logger.error(f"Document processing error: {str(e)}")
+            logger.error(f"Session creation error: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to process documents"
+                detail="Failed to create session"
             )
 
-    async def _handle_failed_login(
-        self,
-        email: str,
-        client_ip: str
-    ) -> None:
-        """Handle failed login attempt with rate limiting."""
+    async def validate_session(self, session_id: str, user_id: str) -> bool:
+        """Validate session status."""
         try:
-            # Increment failed attempts counter
-            key = f"login_attempts:{client_ip}"
-            attempts = await self.redis.incr(key)
+            db = await get_database()
             
-            # Set expiry if first attempt
-            if attempts == 1:
-                await self.redis.expire(key, self.rate_limit_window)
+            session = await db.sessions.find_one({
+                "sessionId": session_id,
+                "userId": ObjectId(user_id),
+                "isActive": True,
+                "expiresAt": {"$gt": datetime.utcnow()}
+            })
             
-            # Lock account if too many attempts
-            if attempts >= self.max_login_attempts:
-                await self._lock_account(email)
-                
+            return bool(session)
+            
         except Exception as e:
-            logger.error(f"Failed login handling error: {str(e)}")
+            logger.error(f"Session validation error: {str(e)}")
+            return False
 
-    def _format_user_response(
-        self,
-        user: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Format user data for response."""
+    async def extend_session(self, session_id: str) -> Dict[str, Any]:
+        """Extend session expiration."""
+        try:
+            db = await get_database()
+            
+            result = await db.sessions.update_one(
+                {"sessionId": session_id},
+                {
+                    "$set": {
+                        "lastActivity": datetime.utcnow(),
+                        "expiresAt": datetime.utcnow() + timedelta(days=1)
+                    }
+                }
+            )
+            
+            if result.modified_count == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid session"
+                )
+                
+            return {"status": "success", "message": "Session extended"}
+            
+        except Exception as e:
+            logger.error(f"Session extension error: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to extend session"
+            )
+
+    async def verify_token(self, token: str, token_type: str = "access") -> Dict[str, Any]:
+        """Verify token validity and blacklist status."""
+        try:
+            is_blacklisted = await self.redis.get(f"blacklist:{token_type}:{token}")
+            if is_blacklisted:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Token has been invalidated"
+                )
+            
+            payload = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=[settings.ALGORITHM]
+            )
+            
+            return payload
+            
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token has expired"
+            )
+        except jwt.JWTError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token"
+            )
+
+    async def _blacklist_token(self, token: str, token_type: str = "refresh") -> None:
+        """Add token to blacklist with TTL."""
+        try:
+            payload = jwt.decode(
+                token,
+                settings.SECRET_KEY,
+                algorithms=[settings.ALGORITHM]
+            )
+            exp = datetime.fromtimestamp(payload["exp"])
+            ttl = max(0, (exp - datetime.utcnow()).total_seconds())
+            
+            await self.redis.setex(
+                f"blacklist:{token_type}:{token}",
+                int(ttl),
+                "1"
+            )
+            
+        except Exception as e:
+            logger.error(f"Token blacklisting error: {str(e)}")
+
+    def get_security_headers(self) -> Dict[str, str]:
+        """Get recommended security headers."""
         return {
-            "id": str(user["_id"]),
-            "email": user["email"],
-            "firstName": user["firstName"],
-            "lastName": user["lastName"],
-            "role": user["role"],
-            "permissions": user.get("permissions", []),
-            "atsCenter": user.get("atsCenter"),
-            "lastLogin": user.get("lastLogin")
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+            "X-XSS-Protection": "1; mode=block",
+            "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+            "Content-Security-Policy": "default-src 'self'",
+            "Referrer-Policy": "strict-origin-when-cross-origin"
         }
 
-class RateLimiter:
-    """Service for implementing rate limiting."""
-    
-    def __init__(self):
-        """Initialize rate limiter with Redis backend."""
-        self.redis = redis.Redis(
-            host=settings.REDIS_HOST,
-            port=settings.REDIS_PORT,
-            password=settings.REDIS_PASSWORD,
-            decode_responses=True,
-            db=settings.REDIS_DB
-        )
-        
-        # Rate limit configurations
-        self.rate_limits = {
-            'login': {
-                'attempts': 5,
-                'window': 300  # 5 minutes
-            },
-            'registration': {
-                'attempts': 3,
-                'window': 3600  # 1 hour
-            },
-            'password_reset': {
-                'attempts': 3,
-                'window': 3600  # 1 hour
-            },
-            'api': {
-                'attempts': 100,
-                'window': 60  # 1 minute
-            }
-        }
-
-    async def check_rate_limit(
-        self,
-        key: str,
-        rate_type: str = 'api',
-        identifier: Optional[str] = None
-    ) -> bool:
-        """Check if request is within rate limits.
-        
-        Args:
-            key: Base key for rate limiting
-            rate_type: Type of rate limit to apply
-            identifier: Optional identifier (e.g., IP address or user ID)
-            
-        Returns:
-            bool: True if within limits, False if limit exceeded
-        """
+    async def initiate_account_recovery(self, email: str, recovery_type: str) -> Dict[str, Any]:
+        """Initiate account recovery process."""
         try:
-            rate_config = self.rate_limits[rate_type]
+            db = await get_database()
+            user = await db.users.find_one({"email": email})
             
-            # Build redis key
-            redis_key = f"ratelimit:{rate_type}:{key}"
-            if identifier:
-                redis_key = f"{redis_key}:{identifier}"
+            if not user:
+                return {"status": "success"}
             
-            # Get current count
-            current = await self.redis.get(redis_key)
-            count = int(current) if current else 0
-            
-            if count >= rate_config['attempts']:
-                return False
+            if recovery_type == "email":
+                recovery_token = secrets.token_urlsafe(32)
+                expires = datetime.utcnow() + timedelta(hours=1)
                 
-            # Update count in transaction
-            pipe = self.redis.pipeline()
-            if count == 0:
-                pipe.setex(
-                    redis_key,
-                    rate_config['window'],
-                    1
-                )
-            else:
-                pipe.incr(redis_key)
-            await pipe.execute()
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Rate limit check error: {str(e)}")
-            return True  # Allow request if rate limiting fails
-
-    async def reset_counter(
-        self,
-        key: str,
-        rate_type: str = 'api',
-        identifier: Optional[str] = None
-    ) -> None:
-        """Reset rate limit counter.
-        
-        Args:
-            key: Base key for rate limiting
-            rate_type: Type of rate limit
-            identifier: Optional identifier
-        """
-        try:
-            redis_key = f"ratelimit:{rate_type}:{key}"
-            if identifier:
-                redis_key = f"{redis_key}:{identifier}"
-            
-            await self.redis.delete(redis_key)
-            
-        except Exception as e:
-            logger.error(f"Counter reset error: {str(e)}")
-
-    async def get_remaining_attempts(
-        self,
-        key: str,
-        rate_type: str = 'api',
-        identifier: Optional[str] = None
-    ) -> int:
-        """Get remaining allowed attempts.
-        
-        Args:
-            key: Base key for rate limiting
-            rate_type: Type of rate limit
-            identifier: Optional identifier
-            
-        Returns:
-            int: Number of remaining attempts
-        """
-        try:
-            rate_config = self.rate_limits[rate_type]
-            
-            redis_key = f"ratelimit:{rate_type}:{key}"
-            if identifier:
-                redis_key = f"{redis_key}:{identifier}"
-            
-            current = await self.redis.get(redis_key)
-            count = int(current) if current else 0
-            
-            return max(0, rate_config['attempts'] - count)
-            
-        except Exception as e:
-            logger.error(f"Remaining attempts check error: {str(e)}")
-            return 0
-
-    async def get_reset_time(
-        self,
-        key: str,
-        rate_type: str = 'api',
-        identifier: Optional[str] = None
-    ) -> Optional[int]:
-        """Get time until rate limit reset.
-        
-        Args:
-            key: Base key for rate limiting
-            rate_type: Type of rate limit
-            identifier: Optional identifier
-            
-        Returns:
-            Optional[int]: Seconds until reset, None if no active limit
-        """
-        try:
-            redis_key = f"ratelimit:{rate_type}:{key}"
-            if identifier:
-                redis_key = f"{redis_key}:{identifier}"
-            
-            ttl = await self.redis.ttl(redis_key)
-            return max(0, ttl) if ttl > -1 else None
-            
-        except Exception as e:
-            logger.error(f"Reset time check error: {str(e)}")
-            return None
-
-# Initialize rate limiter
-rate_limiter = RateLimiter()
-
-# Add decorator for rate limiting endpoints
-def rate_limit(
-    rate_type: str = 'api',
-    key_func: Optional[Callable] = None
-):
-    """Decorator for rate limiting endpoints.
-    
-    Args:
-        rate_type: Type of rate limit to apply
-        key_func: Optional function to generate rate limit key
-    """
-    async def decorator(request: Request):
-        try:
-            # Get rate limit key
-            if key_func:
-                key = key_func(request)
-            else:
-                key = request.url.path
-            
-            # Get client identifier (IP address)
-            client_ip = request.client.host
-            
-            # Check rate limit
-            if not await rate_limiter.check_rate_limit(
-                key,
-                rate_type,
-                client_ip
-            ):
-                # Get reset time
-                reset_time = await rate_limiter.get_reset_time(
-                    key,
-                    rate_type,
-                    client_ip
+                await db.users.update_one(
+                    {"_id": user["_id"]},
+                    {
+                        "$set": {
+                            "recoveryToken": recovery_token,
+                            "recoveryExpires": expires,
+                            "recoveryType": recovery_type
+                        }
+                    }
                 )
                 
-                raise RateLimitError(
-                    message="Rate limit exceeded",
-                    reset_time=datetime.utcnow() + timedelta(seconds=reset_time)
-                    if reset_time else None
+                await self.email_service.send_recovery_instructions(
+                    email=user["email"],
+                    name=f"{user['firstName']} {user['lastName']}",
+                    recovery_token=recovery_token
                 )
-                
-        except RateLimitError:
-            raise
+            
+            return {"status": "success", "message": "Recovery instructions sent"}
+            
         except Exception as e:
-            logger.error(f"Rate limiting error: {str(e)}")
-    
-    return decorator
+            logger.error(f"Account recovery error: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to initiate recovery"
+            )
 
-# Initialize authentication service
+# Initialize services
 auth_service = AuthenticationService()
+rate_limiter = RateLimiter()

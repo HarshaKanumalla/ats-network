@@ -31,22 +31,10 @@ router = APIRouter()
 async def create_test_session(
     vehicle_id: str,
     center_id: str,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.CONDUCT_TESTS))
 ) -> TestResponse:
-    """Initialize a new vehicle test session.
-    
-    Args:
-        vehicle_id: ID of vehicle to test
-        center_id: ID of testing center
-        current_user: Authenticated user
-        
-    Returns:
-        Created test session information
-        
-    Raises:
-        HTTPException: If creation fails or validation errors occur
-    """
+    """Initialize a new vehicle test session."""
     try:
         # Verify test prerequisites
         if not await test_service.verify_test_prerequisites(
@@ -81,7 +69,7 @@ async def create_test_session(
             center_id=center_id
         )
 
-        logger.info(f"Created test session: {session.session_code}")
+        logger.info(f"Test session created successfully: {session.session_code}")
         return TestResponse(
             status="success",
             message="Test session created successfully",
@@ -91,7 +79,7 @@ async def create_test_session(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Session creation error: {str(e)}")
+        logger.error(f"Test session creation error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create test session"
@@ -103,25 +91,19 @@ async def websocket_endpoint(
     session_id: str,
     token: str
 ):
-    """WebSocket endpoint for real-time test data streaming.
-    
-    Args:
-        websocket: WebSocket connection
-        session_id: ID of test session
-        token: Authentication token
-    """
+    """WebSocket endpoint for real-time test data streaming."""
     try:
         # Verify token and permissions
         current_user = await verify_websocket_token(token)
         if not current_user:
-            await websocket.close(code=4001)
             logger.warning(f"Invalid token for WebSocket connection: {session_id}")
+            await websocket.close(code=4001)
             return
 
         # Verify session access
         if not await check_test_access(current_user, session_id):
-            await websocket.close(code=4003)
             logger.warning(f"Unauthorized session access attempt: {session_id}")
+            await websocket.close(code=4003)
             return
 
         # Accept connection
@@ -194,24 +176,10 @@ async def update_test_data(
     test_type: TestType,
     data: Dict[str, Any],
     images: Optional[List[UploadFile]] = File(None),
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.CONDUCT_TESTS))
 ) -> TestResponse:
-    """Update test measurement data.
-    
-    Args:
-        session_id: ID of test session
-        test_type: Type of test being performed
-        data: Test measurement data
-        images: Optional test images
-        current_user: Authenticated user
-        
-    Returns:
-        Updated test session information
-        
-    Raises:
-        HTTPException: If update fails or validation errors occur
-    """
+    """Update test measurement data."""
     try:
         # Verify session access
         if not await check_test_access(current_user, session_id):
@@ -247,6 +215,7 @@ async def update_test_data(
             updated_by=str(current_user.id)
         )
 
+        logger.info(f"Test data updated successfully for session ID: {session_id}")
         return TestResponse(
             status="success",
             message="Test data updated successfully",
@@ -265,21 +234,10 @@ async def update_test_data(
 @router.post("/sessions/{session_id}/complete", response_model=TestResponse)
 async def complete_test_session(
     session_id: str,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.CONDUCT_TESTS))
 ) -> TestResponse:
-    """Complete a test session and generate final results.
-    
-    Args:
-        session_id: ID of test session
-        current_user: Authenticated user
-        
-    Returns:
-        Completed test session information
-        
-    Raises:
-        HTTPException: If completion fails
-    """
+    """Complete a test session and generate final results."""
     try:
         # Verify session access
         if not await check_test_access(current_user, session_id):
@@ -308,6 +266,7 @@ async def complete_test_session(
         # Update monitoring status
         await test_monitor.stop_monitoring_session(session_id)
 
+        logger.info(f"Test session completed successfully for session ID: {session_id}")
         return TestResponse(
             status="success",
             message="Test session completed successfully",
@@ -326,21 +285,10 @@ async def complete_test_session(
 @router.get("/sessions/{session_id}/status", response_model=Dict[str, Any])
 async def get_session_status(
     session_id: str,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.VIEW_TEST_STATUS))
 ) -> Dict[str, Any]:
-    """Get current test session status and progress.
-    
-    Args:
-        session_id: ID of test session
-        current_user: Authenticated user
-        
-    Returns:
-        Session status information
-        
-    Raises:
-        HTTPException: If retrieval fails
-    """
+    """Get current test session status and progress."""
     try:
         # Verify session access
         if not await check_test_access(current_user, session_id):
@@ -351,6 +299,7 @@ async def get_session_status(
 
         status = await test_service.get_session_status(session_id)
 
+        logger.info(f"Session status retrieved successfully for session ID: {session_id}")
         return {
             "status": "success",
             "message": "Session status retrieved successfully",
@@ -369,21 +318,10 @@ async def get_session_status(
 @router.get("/vehicles/{vehicle_id}/history", response_model=List[TestResponse])
 async def get_vehicle_test_history(
     vehicle_id: str,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.VIEW_TEST_HISTORY))
 ) -> List[TestResponse]:
-    """Get complete test history for a vehicle.
-    
-    Args:
-        vehicle_id: ID of vehicle
-        current_user: Authenticated user
-        
-    Returns:
-        List of test sessions for vehicle
-        
-    Raises:
-        HTTPException: If retrieval fails
-    """
+    """Get complete test history for a vehicle."""
     try:
         # Get test history with role-based filtering
         sessions = await test_service.get_vehicle_test_history(
@@ -391,6 +329,7 @@ async def get_vehicle_test_history(
             user=current_user
         )
 
+        logger.info(f"Test history retrieved successfully for vehicle ID: {vehicle_id}")
         return [
             TestResponse(
                 status="success",

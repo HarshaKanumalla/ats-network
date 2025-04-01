@@ -1,6 +1,4 @@
-# backend/app/services/storage/s3_service.py
-
-from typing import Dict, Any, Optional, BinaryIO
+from typing import Dict, Any, Optional, BinaryIO, List
 import logging
 from datetime import datetime
 import boto3
@@ -70,6 +68,14 @@ class S3StorageService:
             # Construct S3 key
             key = f"{folder.strip('/')}/{filename}"
             
+            # Check file size for multipart upload
+            file.seek(0, 2)
+            size = file.tell()
+            file.seek(0)
+            
+            if size > self.storage_config['chunk_size']:
+                return await self._handle_multipart_upload(file, key, content_type, metadata)
+            
             # Prepare upload parameters
             upload_params = {
                 'Bucket': self.bucket_name,
@@ -95,9 +101,17 @@ class S3StorageService:
             raise StorageError(f"Failed to upload document: {str(e)}")
 
     async def delete_document(self, file_key: str) -> None:
-        """Delete document from S3."""
+        """Delete document from S3 with existence check."""
         try:
             async with self.session.client('s3') as s3:
+                # Check if file exists
+                try:
+                    await s3.head_object(Bucket=self.bucket_name, Key=file_key)
+                except ClientError as e:
+                    if e.response['Error']['Code'] == '404':
+                        raise StorageError(f"Document not found: {file_key}")
+                    raise
+                
                 await s3.delete_object(
                     Bucket=self.bucket_name,
                     Key=file_key
@@ -105,9 +119,41 @@ class S3StorageService:
                 
             logger.info(f"Deleted document: {file_key}")
             
+        except StorageError:
+            raise
         except Exception as e:
             logger.error(f"Document deletion error: {str(e)}")
             raise StorageError(f"Failed to delete document: {str(e)}")
+
+    async def download_document(
+        self,
+        file_key: str,
+        destination_path: Path
+    ) -> None:
+        """Download document from S3 to local file system."""
+        try:
+            async with self.session.client('s3') as s3:
+                # Check if file exists
+                try:
+                    await s3.head_object(Bucket=self.bucket_name, Key=file_key)
+                except ClientError as e:
+                    if e.response['Error']['Code'] == '404':
+                        raise StorageError(f"Document not found: {file_key}")
+                    raise
+                
+                await s3.download_file(
+                    self.bucket_name,
+                    file_key,
+                    str(destination_path)
+                )
+                
+            logger.info(f"Downloaded document to: {destination_path}")
+            
+        except StorageError:
+            raise
+        except Exception as e:
+            logger.error(f"Document download error: {str(e)}")
+            raise StorageError(f"Failed to download document: {str(e)}")
 
     async def get_document_url(
         self,
@@ -117,17 +163,115 @@ class S3StorageService:
         """Generate pre-signed URL for document access."""
         try:
             async with self.session.client('s3') as s3:
+                # Check if file exists
+                try:
+                    await s3.head_object(Bucket=self.bucket_name, Key=file_key)
+                except ClientError as e:
+                    if e.response['Error']['Code'] == '404':
+                        raise StorageError(f"Document not found: {file_key}")
+                    raise
+                
                 url = await s3.generate_presigned_url(
                     'get_object',
                     Params={
                         'Bucket': self.bucket_name,
-                ExpiresIn=expiry
-            )
-            return url
+                        'Key': file_key
+                    },
+                    ExpiresIn=expiry
+                )
+                return url
             
+        except StorageError:
+            raise
         except Exception as e:
             logger.error(f"URL generation error: {str(e)}")
             raise StorageError("Failed to generate document URL")
+
+    async def document_exists(self, file_key: str) -> bool:
+        """Check if document exists in S3."""
+        try:
+            async with self.session.client('s3') as s3:
+                try:
+                    await s3.head_object(
+                        Bucket=self.bucket_name,
+                        Key=file_key
+                    )
+                    return True
+                except ClientError as e:
+                    if e.response['Error']['Code'] == '404':
+                        return False
+                    raise
+        except Exception as e:
+            logger.error(f"Document existence check error: {str(e)}")
+            raise StorageError(f"Failed to check document existence: {str(e)}")
+
+    async def _handle_multipart_upload(
+        self,
+        file: BinaryIO,
+        key: str,
+        content_type: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None
+    ) -> str:
+        """Handle large file uploads using multipart upload."""
+        mpu = None
+        try:
+            async with self.session.client('s3') as s3:
+                # Initiate multipart upload
+                mpu = await s3.create_multipart_upload(
+                    Bucket=self.bucket_name,
+                    Key=key,
+                    ContentType=content_type,
+                    Metadata=self._sanitize_metadata(metadata or {}),
+                    ServerSideEncryption='AES256'
+                )
+                
+                parts = []
+                part_number = 1
+                
+                while True:
+                    data = file.read(self.storage_config['chunk_size'])
+                    if not data:
+                        break
+                    
+                    # Upload part
+                    part = await s3.upload_part(
+                        Bucket=self.bucket_name,
+                        Key=key,
+                        PartNumber=part_number,
+                        UploadId=mpu['UploadId'],
+                        Body=data
+                    )
+                    
+                    parts.append({
+                        'PartNumber': part_number,
+                        'ETag': part['ETag']
+                    })
+                    part_number += 1
+                
+                # Complete multipart upload
+                await s3.complete_multipart_upload(
+                    Bucket=self.bucket_name,
+                    Key=key,
+                    UploadId=mpu['UploadId'],
+                    MultipartUpload={'Parts': parts}
+                )
+                
+                return f"https://{self.bucket_name}.s3.{settings.AWS_REGION}.amazonaws.com/{key}"
+                
+        except Exception as e:
+            # Cleanup failed upload
+            if mpu:
+                try:
+                    async with self.session.client('s3') as s3:
+                        await s3.abort_multipart_upload(
+                            Bucket=self.bucket_name,
+                            Key=key,
+                            UploadId=mpu['UploadId']
+                        )
+                except Exception:
+                    pass
+            logger.error(f"Multipart upload error: {str(e)}")
+            raise StorageError(f"Failed to complete multipart upload: {str(e)}")
 
     async def _validate_file(
         self,
@@ -140,6 +284,9 @@ class S3StorageService:
             file.seek(0, 2)  # Seek to end
             size = file.tell()
             file.seek(0)  # Reset position
+            
+            if size <= 0:
+                raise StorageError("File is empty")
             
             if size > self.storage_config['max_file_size']:
                 raise StorageError(
@@ -249,6 +396,14 @@ class S3StorageService:
         """Copy document within S3 bucket."""
         try:
             async with self.session.client('s3') as s3:
+                # Check if source exists
+                try:
+                    await s3.head_object(Bucket=self.bucket_name, Key=source_key)
+                except ClientError as e:
+                    if e.response['Error']['Code'] == '404':
+                        raise StorageError(f"Source document not found: {source_key}")
+                    raise
+
                 copy_source = {
                     'Bucket': self.bucket_name,
                     'Key': source_key
@@ -262,6 +417,8 @@ class S3StorageService:
                 
             return f"https://{self.bucket_name}.s3.{settings.AWS_REGION}.amazonaws.com/{destination_key}"
             
+        except StorageError:
+            raise
         except Exception as e:
             logger.error(f"Document copy error: {str(e)}")
             raise StorageError("Failed to copy document")
@@ -273,10 +430,15 @@ class S3StorageService:
         """Get document metadata from S3."""
         try:
             async with self.session.client('s3') as s3:
-                response = await s3.head_object(
-                    Bucket=self.bucket_name,
-                    Key=file_key
-                )
+                try:
+                    response = await s3.head_object(
+                        Bucket=self.bucket_name,
+                        Key=file_key
+                    )
+                except ClientError as e:
+                    if e.response['Error']['Code'] == '404':
+                        raise StorageError(f"Document not found: {file_key}")
+                    raise
                 
                 return {
                     'metadata': response.get('Metadata', {}),
@@ -286,6 +448,8 @@ class S3StorageService:
                     'etag': response.get('ETag')
                 }
                 
+        except StorageError:
+            raise
         except Exception as e:
             logger.error(f"Metadata retrieval error: {str(e)}")
             raise StorageError("Failed to get document metadata")

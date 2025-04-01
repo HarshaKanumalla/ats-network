@@ -1,5 +1,3 @@
-# backend/app/services/cleanup/cleanup_service.py
-
 from typing import Dict, Any, List, Optional
 import logging
 from datetime import datetime, timedelta
@@ -42,19 +40,43 @@ class CleanupService:
         
         logger.info("Cleanup service initialized")
 
-    async def start_cleanup_tasks(self) -> None:
-        """Start all cleanup tasks."""
+    async def _get_database(self):
+        """Get database connection with error handling."""
         try:
-            cleanup_tasks = [
-                self._cleanup_expired_sessions(),
-                self._cleanup_temporary_files(),
-                self._cleanup_old_notifications(),
-                self._cleanup_audit_logs(),
-                self._cleanup_test_results()
+            return await get_database()
+        except Exception as e:
+            logger.error(f"Database connection error: {str(e)}")
+            raise CleanupError("Failed to connect to the database")
+
+    async def _retry_s3_operation(self, operation: callable, *args, retries: int = 3, **kwargs):
+        """Retry S3 operation in case of transient failures."""
+        for attempt in range(retries):
+            try:
+                return await operation(*args, **kwargs)
+            except Exception as e:
+                if attempt < retries - 1:
+                    logger.warning(f"S3 operation failed, retrying... ({attempt + 1}/{retries})")
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                else:
+                    logger.error(f"S3 operation failed after {retries} retries: {str(e)}")
+                    raise CleanupError("S3 operation failed")
+
+    async def start_cleanup_tasks(self) -> None:
+        """Start all cleanup tasks with concurrency control."""
+        try:
+            tasks = [
+                asyncio.create_task(self._cleanup_expired_sessions()),
+                asyncio.create_task(self._cleanup_temporary_files()),
+                asyncio.create_task(self._cleanup_old_notifications()),
+                asyncio.create_task(self._cleanup_audit_logs()),
+                asyncio.create_task(self._cleanup_test_results())
             ]
             
-            await asyncio.gather(*cleanup_tasks)
-            
+            for task in asyncio.as_completed(tasks):
+                try:
+                    await task
+                except Exception as e:
+                    logger.error(f"Cleanup task failed: {str(e)}")
         except Exception as e:
             logger.error(f"Cleanup tasks startup error: {str(e)}")
             raise CleanupError("Failed to start cleanup tasks")
@@ -63,7 +85,7 @@ class CleanupService:
         """Clean up expired user sessions periodically."""
         while True:
             try:
-                db = await get_database()
+                db = await self._get_database()
                 current_time = datetime.utcnow()
                 
                 # Find expired sessions
@@ -103,11 +125,13 @@ class CleanupService:
     async def _cleanup_temporary_files(self) -> None:
         """Clean up temporary files from S3 storage."""
         while True:
-            try:                db = await get_database()
+            try:
+                db = await self._get_database()
                 current_time = datetime.utcnow()
                 
                 # Get list of temporary files from S3
-                temp_files = await s3_service.list_documents(
+                temp_files = await self._retry_s3_operation(
+                    s3_service.list_documents,
                     folder='temp',
                     max_keys=1000
                 )
@@ -116,7 +140,7 @@ class CleanupService:
                     # Check if file has expired
                     if file.get('last_modified') + self.retention_periods['temporary_files'] < current_time:
                         # Delete from S3
-                        await s3_service.delete_document(file['key'])
+                        await self._retry_s3_operation(s3_service.delete_document, file['key'])
                         
                         # Log deletion
                         await db.auditLogs.insert_one({
@@ -136,7 +160,7 @@ class CleanupService:
         """Clean up old notifications based on retention policy."""
         while True:
             try:
-                db = await get_database()
+                db = await self._get_database()
                 current_time = datetime.utcnow()
                 retention_cutoff = current_time - self.retention_periods['notifications']
                 
@@ -184,7 +208,7 @@ class CleanupService:
         """Archive and clean up old audit logs."""
         while True:
             try:
-                db = await get_database()
+                db = await self._get_database()
                 current_time = datetime.utcnow()
                 retention_cutoff = current_time - self.retention_periods['audit_logs']
                 
@@ -232,7 +256,7 @@ class CleanupService:
         """Archive old test results and related data."""
         while True:
             try:
-                db = await get_database()
+                db = await self._get_database()
                 current_time = datetime.utcnow()
                 retention_cutoff = current_time - self.retention_periods['test_results']
                 
@@ -261,11 +285,12 @@ class CleanupService:
                         if 'documents' in session:
                             for doc in session['documents']:
                                 new_key = f"archives/tests/{session['_id']}/{doc['filename']}"
-                                await s3_service.copy_document(
+                                await self._retry_s3_operation(
+                                    s3_service.copy_document,
                                     doc['key'],
                                     new_key
                                 )
-                                await s3_service.delete_document(doc['key'])
+                                await self._retry_s3_operation(s3_service.delete_document, doc['key'])
                         
                         # Mark session as archived
                         await db.testSessions.update_one(
@@ -289,11 +314,12 @@ class CleanupService:
         """Clean up incomplete and failed file uploads."""
         try:
             # Get incomplete multipart uploads
-            incomplete_uploads = await s3_service.list_multipart_uploads()
+            incomplete_uploads = await self._retry_s3_operation(s3_service.list_multipart_uploads)
             
             for upload in incomplete_uploads:
                 if upload['Initiated'] + timedelta(days=1) < datetime.utcnow():
-                    await s3_service.abort_multipart_upload(
+                    await self._retry_s3_operation(
+                        s3_service.abort_multipart_upload,
                         upload['Key'],
                         upload['UploadId']
                     )
@@ -307,7 +333,7 @@ class CleanupService:
     async def cleanup_orphaned_files(self) -> None:
         """Clean up orphaned files in storage."""
         try:
-            db = await get_database()
+            db = await self._get_database()
             
             # Get all document references from database
             referenced_files = set()
@@ -331,7 +357,7 @@ class CleanupService:
                         referenced_files.add(doc['fileUrl'])
             
             # Get all files from S3
-            all_files = await s3_service.list_all_documents()
+            all_files = await self._retry_s3_operation(s3_service.list_all_documents)
             
             # Find orphaned files
             orphaned_files = [
@@ -341,7 +367,7 @@ class CleanupService:
             
             # Delete orphaned files
             for file in orphaned_files:
-                await s3_service.delete_document(file['key'])
+                await self._retry_s3_operation(s3_service.delete_document, file['key'])
                 
                 # Log deletion
                 await db.auditLogs.insert_one({

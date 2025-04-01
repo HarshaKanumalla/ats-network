@@ -14,14 +14,16 @@ from ...config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+
 class RoleBasedAccessControl:
     """Manages role-based access control and permissions."""
-    
+
     def __init__(self):
         """Initialize RBAC with role hierarchy and permissions."""
         self.security_service = None
         self._initialized = False
 
+        # Role hierarchy and permissions
         self.role_hierarchy = {
             "transport_commissioner": [
                 "additional_commissioner",
@@ -48,87 +50,59 @@ class RoleBasedAccessControl:
                 "ats_testing"
             ]
         }
-        
+
         self.role_permissions = {
             "transport_commissioner": {
-                # System Administration
                 "manage_system_settings",
                 "view_audit_logs",
                 "manage_system_maintenance",
-                
-                # User Management
                 "manage_users",
                 "manage_roles",
                 "view_all_users",
-                
-                # Center Management
                 "manage_centers",
                 "approve_centers",
                 "view_all_centers",
-                
-                # Analytics & Reports
                 "view_system_analytics",
                 "generate_system_reports",
                 "view_all_statistics"
             },
             "additional_commissioner": {
-                # Center Management
                 "view_all_centers",
                 "approve_centers",
-                
-                # Test Management
                 "approve_tests",
                 "view_test_reports",
-                
-                # Analytics & Reports
                 "view_regional_analytics",
                 "view_center_statistics"
             },
             "rto_officer": {
-                # Vehicle Management
                 "manage_vehicles",
                 "view_vehicle_history",
-                
-                # Test Management
                 "approve_tests",
                 "view_test_reports",
-                
-                # Center Management
                 "view_assigned_centers"
             },
             "ats_owner": {
-                # Center Management
                 "manage_own_center",
                 "view_center_reports",
-                
-                # Staff Management
                 "manage_center_staff",
-                
-                # Equipment Management
                 "manage_equipment",
-                
-                # Analytics
                 "view_center_analytics"
             },
             "ats_admin": {
-                # Test Management
                 "manage_tests",
                 "schedule_tests",
                 "view_test_history",
-                
-                # Equipment Management
                 "manage_equipment_status",
                 "view_equipment_reports"
             },
             "ats_testing": {
-                # Test Operations
                 "conduct_tests",
                 "upload_test_data",
                 "view_test_results"
             }
         }
-        
-        logger.info("RBAC system initialized with role hierarchy")
+
+        logger.info("RBAC system initialized with role hierarchy and permissions")
 
     async def initialize(self):
         """Initialize RBAC system with required dependencies."""
@@ -144,23 +118,27 @@ class RoleBasedAccessControl:
         required_permission: str,
         resource_id: Optional[str] = None
     ) -> bool:
-        """Verify if user has required permission for a resource.
-        
+        """
+        Verify if a user has the required permission for a resource.
+
         Args:
-            user_id: User identifier
-            required_permission: Permission to check
-            resource_id: Optional resource identifier
-            
+            user_id (str): User identifier.
+            required_permission (str): Permission to check.
+            resource_id (Optional[str]): Optional resource identifier.
+
         Returns:
-            True if user has permission, False otherwise
-            
+            bool: True if the user has permission, False otherwise.
+
         Raises:
-            AuthorizationError: If verification fails
+            AuthorizationError: If verification fails.
         """
         try:
+            if not ObjectId.is_valid(user_id):
+                raise ValueError("Invalid user ID format")
+
             db = await get_database()
             user = await db.users.find_one({"_id": ObjectId(user_id)})
-            
+
             if not user:
                 raise AuthorizationError("User not found")
 
@@ -169,6 +147,7 @@ class RoleBasedAccessControl:
 
             # Check for required permission
             if required_permission not in user_permissions:
+                logger.warning(f"User {user_id} lacks permission: {required_permission}")
                 return False
 
             # Handle resource-specific permissions
@@ -178,27 +157,30 @@ class RoleBasedAccessControl:
                     resource_id=resource_id,
                     permission=required_permission
                 ):
+                    logger.warning(f"User {user_id} lacks resource-specific permission: {required_permission}")
                     return False
 
+            logger.info(f"Permission '{required_permission}' verified successfully for user ID: {user_id}")
             return True
 
         except AuthorizationError:
             raise
         except Exception as e:
-            logger.error(f"Permission verification error: {str(e)}")
-            return False
+            logger.error(f"Permission verification error for user ID {user_id}: {str(e)}")
+            raise AuthorizationError("Failed to verify permission")
 
     async def get_role_permissions(self, role: str) -> Set[str]:
-        """Get all permissions for a role including inherited permissions.
-        
+        """
+        Get all permissions for a role, including inherited permissions.
+
         Args:
-            role: Role identifier
-            
+            role (str): Role identifier.
+
         Returns:
-            Set of all permissions for the role
+            Set[str]: Set of all permissions for the role.
         """
         permissions = set(self.role_permissions.get(role, set()))
-        
+
         # Add inherited permissions
         for inherited_role in self.role_hierarchy.get(role, []):
             permissions.update(self.role_permissions.get(inherited_role, set()))
@@ -211,25 +193,37 @@ class RoleBasedAccessControl:
         new_role: str,
         assigned_by: str
     ) -> Dict[str, Any]:
-        """Assign new role to user with proper validation.
-        
+        """
+        Assign a new role to a user with proper validation.
+
         Args:
-            user_id: User identifier
-            new_role: Role to assign
-            assigned_by: Administrator making the change
-            
+            user_id (str): User identifier.
+            new_role (str): Role to assign.
+            assigned_by (str): Administrator making the change.
+
         Returns:
-            Updated user information
-            
+            Dict[str, Any]: Updated user information.
+
         Raises:
-            AuthorizationError: If role assignment fails
+            AuthorizationError: If role assignment fails.
         """
         try:
+            if not ObjectId.is_valid(user_id) or not ObjectId.is_valid(assigned_by):
+                raise ValueError("Invalid user ID format")
+
             db = await get_database()
-            
+
             # Validate role exists
             if new_role not in self.role_hierarchy and new_role not in self.role_permissions:
                 raise AuthorizationError("Invalid role")
+
+            # Validate assigner's permissions
+            assigner = await db.users.find_one({"_id": ObjectId(assigned_by)})
+            if not assigner:
+                raise AuthorizationError("Assigning user not found")
+
+            if not await self.check_role_hierarchy(assigner["role"], new_role):
+                raise AuthorizationError("Insufficient permissions to assign this role")
 
             # Update user role
             result = await db.users.find_one_and_update(
@@ -243,7 +237,7 @@ class RoleBasedAccessControl:
                 },
                 return_document=True
             )
-            
+
             if not result:
                 raise AuthorizationError("User not found")
 
@@ -255,12 +249,13 @@ class RoleBasedAccessControl:
                 changed_by=assigned_by
             )
 
+            logger.info(f"Role '{new_role}' assigned to user ID {user_id} by admin ID {assigned_by}")
             return result
 
         except AuthorizationError:
             raise
         except Exception as e:
-            logger.error(f"Role assignment error: {str(e)}")
+            logger.error(f"Role assignment error for user ID {user_id}: {str(e)}")
             raise AuthorizationError("Failed to assign role")
 
     async def check_role_hierarchy(
@@ -268,18 +263,19 @@ class RoleBasedAccessControl:
         admin_role: str,
         target_role: str
     ) -> bool:
-        """Check if admin role can manage target role.
-        
+        """
+        Check if an admin role can manage a target role.
+
         Args:
-            admin_role: Role of administrator
-            target_role: Role being managed
-            
+            admin_role (str): Role of the administrator.
+            target_role (str): Role being managed.
+
         Returns:
-            True if admin can manage target role, False otherwise
+            bool: True if the admin can manage the target role, False otherwise.
         """
         if admin_role == target_role:
             return False
-            
+
         return target_role in self.role_hierarchy.get(admin_role, [])
 
     async def filter_data_by_role(
@@ -288,23 +284,24 @@ class RoleBasedAccessControl:
         data_type: str,
         data: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Filter data based on user's role and permissions.
-        
+        """
+        Filter data based on the user's role and permissions.
+
         Args:
-            user_id: User identifier
-            data_type: Type of data being filtered
-            data: Data to filter
-            
+            user_id (str): User identifier.
+            data_type (str): Type of data being filtered.
+            data (List[Dict[str, Any]]): Data to filter.
+
         Returns:
-            Filtered data list
-            
+            List[Dict[str, Any]]: Filtered data list.
+
         Raises:
-            AuthorizationError: If filtering fails
+            AuthorizationError: If filtering fails.
         """
         try:
             db = await get_database()
             user = await db.users.find_one({"_id": ObjectId(user_id)})
-            
+
             if not user:
                 raise AuthorizationError("User not found")
 
@@ -316,6 +313,7 @@ class RoleBasedAccessControl:
             elif data_type == "tests":
                 return await self._filter_test_data(user, data)
             else:
+                logger.warning(f"Unsupported data type '{data_type}' for filtering")
                 return []
 
         except Exception as e:
@@ -328,45 +326,49 @@ class RoleBasedAccessControl:
         resource_id: str,
         permission: str
     ) -> bool:
-        """Verify user's access to specific resource.
-        
+        """
+        Verify a user's access to a specific resource.
+
         Args:
-            user: User information
-            resource_id: Resource identifier
-            permission: Required permission
-            
+            user (Dict[str, Any]): User information.
+            resource_id (str): Resource identifier.
+            permission (str): Required permission.
+
         Returns:
-            True if user has access, False otherwise
+            bool: True if the user has access, False otherwise.
         """
         try:
             db = await get_database()
-            
+
             # Handle center-specific permissions
             if permission.startswith("center_"):
                 center = await db.centers.find_one({"_id": ObjectId(resource_id)})
                 if not center:
+                    logger.warning(f"Center {resource_id} not found")
                     return False
-                    
+
                 if user["role"] == "ats_owner":
                     return str(center["ownerId"]) == str(user["_id"])
                 elif user["role"] == "rto_officer":
                     return center["district"] in user.get("jurisdiction", [])
-            
+
             # Handle test-specific permissions
             elif permission.startswith("test_"):
                 test = await db.tests.find_one({"_id": ObjectId(resource_id)})
                 if not test:
+                    logger.warning(f"Test {resource_id} not found")
                     return False
-                    
+
                 if user["role"] in ["ats_admin", "ats_testing"]:
                     return str(test["centerId"]) == str(user.get("centerId"))
-            
+
             # Handle vehicle-specific permissions
             elif permission.startswith("vehicle_"):
                 vehicle = await db.vehicles.find_one({"_id": ObjectId(resource_id)})
                 if not vehicle:
+                    logger.warning(f"Vehicle {resource_id} not found")
                     return False
-                    
+
                 if user["role"] == "rto_officer":
                     return vehicle["registrationDistrict"] in user.get("jurisdiction", [])
 
@@ -381,7 +383,7 @@ class RoleBasedAccessControl:
         user: Dict[str, Any],
         data: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """Filter center data based on user's role."""
+        """Filter center data based on the user's role."""
         if user["role"] in ["transport_commissioner", "additional_commissioner"]:
             return data
         elif user["role"] == "rto_officer":
@@ -396,7 +398,6 @@ class RoleBasedAccessControl:
             ]
         return []
 
+
 # Initialize RBAC system
 rbac_system = RoleBasedAccessControl()
-
-

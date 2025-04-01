@@ -1,5 +1,3 @@
-# backend/app/services/scheduler/service.py
-
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Callable
 import logging
@@ -91,6 +89,10 @@ class TaskSchedulerService:
             # Validate cron expression
             if not croniter.is_valid(cron_expression):
                 raise SchedulerError("Invalid cron expression")
+            
+            # Validate task priority
+            if priority not in self.task_priorities:
+                raise SchedulerError(f"Invalid task priority: {priority}")
             
             # Generate task ID
             task_id = f"{task_name}_{datetime.utcnow().timestamp()}"
@@ -215,8 +217,14 @@ class TaskSchedulerService:
     ) -> None:
         """Handle automated database backup."""
         try:
-            # Implementation for database backup
-            pass
+            # Example: Backup database to S3
+            backup_file = await db_manager.backup_database()
+            await s3_service.upload_document(
+                file=backup_file,
+                folder="backups/databases",
+                metadata={"task": "database_backup"}
+            )
+            logger.info("Database backup completed successfully")
         except Exception as e:
             logger.error(f"Database backup error: {str(e)}")
             raise SchedulerError("Failed to perform database backup")
@@ -227,59 +235,43 @@ class TaskSchedulerService:
     ) -> None:
         """Handle temporary document cleanup."""
         try:
-            # Implementation for document cleanup
-            pass
+            # Example: Cleanup old documents
+            cutoff_date = datetime.utcnow() - timedelta(days=30)
+            await db_manager.execute_query(
+                collection="documents",
+                operation="delete_many",
+                query={"created_at": {"$lt": cutoff_date}}
+            )
+            logger.info("Document cleanup completed successfully")
         except Exception as e:
             logger.error(f"Document cleanup error: {str(e)}")
             raise SchedulerError("Failed to cleanup documents")
 
-    async def _handle_analytics_update(
-        self,
-        data: Optional[Dict[str, Any]] = None
-    ) -> None:
-        """Handle analytics data update."""
-        try:
-            # Implementation for analytics update
-            pass
-        except Exception as e:
-            logger.error(f"Analytics update error: {str(e)}")
-            raise SchedulerError("Failed to update analytics")
+    async def _monitor_tasks(self) -> None:
+        """Monitor active tasks and ensure they are running as expected."""
+        while True:
+            try:
+                for task_id, task in list(self.active_tasks.items()):
+                    if task["status"] == "running" and datetime.utcnow() > task["timeout"]:
+                        logger.warning(f"Task {task_id} timed out")
+                        await self._handle_task_failure(task_id, "Task timed out")
+                await asyncio.sleep(60)  # Check every minute
+            except Exception as e:
+                logger.error(f"Task monitoring error: {str(e)}")
 
-    async def _handle_system_health_check(
-        self,
-        data: Optional[Dict[str, Any]] = None
-    ) -> None:
-        """Handle system health monitoring."""
+    async def _notify_task_failure(self, task_id: str, error_message: str) -> None:
+        """Notify about task failure."""
         try:
-            # Implementation for health check
-            pass
+            await notification_service.send_notification(
+                user_id="admin",  # Replace with actual user ID
+                title=f"Task {task_id} Failed",
+                message=f"Task {task_id} failed with error: {error_message}",
+                notification_type="task_failure",
+                data={"task_id": task_id, "error": error_message}
+            )
+            logger.info(f"Notification sent for failed task {task_id}")
         except Exception as e:
-            logger.error(f"Health check error: {str(e)}")
-            raise SchedulerError("Failed to perform health check")
-
-    async def _handle_equipment_check(
-        self,
-        data: Optional[Dict[str, Any]] = None
-    ) -> None:
-        """Handle equipment monitoring and maintenance checks."""
-        try:
-            # Implementation for equipment check
-            pass
-        except Exception as e:
-            logger.error(f"Equipment check error: {str(e)}")
-            raise SchedulerError("Failed to check equipment")
-
-    async def _handle_expiry_notifications(
-        self,
-        data: Optional[Dict[str, Any]] = None
-    ) -> None:
-        """Handle document and certificate expiry notifications."""
-        try:
-            # Implementation for expiry notifications
-            pass
-        except Exception as e:
-            logger.error(f"Expiry notification error: {str(e)}")
-            raise SchedulerError("Failed to send expiry notifications")
+            logger.error(f"Task failure notification error: {str(e)}")
 
 # Initialize task scheduler
 task_scheduler = TaskSchedulerService()

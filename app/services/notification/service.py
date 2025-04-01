@@ -1,7 +1,5 @@
-# backend/app/services/notification/service.py
-
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional, Set
+from typing import Dict, Any, List, Optional
 import logging
 import asyncio
 from bson import ObjectId
@@ -365,6 +363,54 @@ class NotificationService:
             
         except Exception as e:
             logger.error(f"Status update error: {str(e)}")
+
+    async def _should_retry_delivery(
+        self,
+        notification_id: str,
+        channel: str
+    ) -> bool:
+        """Determine if a delivery should be retried."""
+        try:
+            db = await get_database()
+            notification = await db.notifications.find_one({"_id": ObjectId(notification_id)})
+            if not notification:
+                return False
+
+            retries = sum(1 for c in notification.get("channels", []) if c["name"] == channel and c["status"] == "failed")
+            return retries < self.retry_settings["max_attempts"]
+        except Exception as e:
+            logger.error(f"Retry check error: {str(e)}")
+            return False
+
+    async def _schedule_retry(
+        self,
+        notification_id: str,
+        channel: str,
+        notification: Dict[str, Any]
+    ) -> None:
+        """Schedule a retry for a failed delivery."""
+        try:
+            delay = self.retry_settings["retry_delay"]
+            if self.retry_settings["exponential_backoff"]:
+                retries = sum(1 for c in notification.get("channels", []) if c["name"] == channel and c["status"] == "failed")
+                delay *= (2 ** retries)
+
+            logger.info(f"Scheduling retry for notification {notification_id} on channel {channel} in {delay} seconds")
+            await asyncio.sleep(delay)
+            await self._deliver_notification(notification_id, channel, notification)
+        except Exception as e:
+            logger.error(f"Retry scheduling error: {str(e)}")
+
+    async def _cleanup_expired_notifications(self) -> None:
+        """Clean up expired in-app notifications."""
+        try:
+            db = await get_database()
+            await db.in_app_notifications.delete_many({
+                "expiresAt": {"$lt": datetime.utcnow()}
+            })
+            logger.info("Expired notifications cleaned up")
+        except Exception as e:
+            logger.error(f"Notification cleanup error: {str(e)}")
 
 # Initialize notification service
 notification_service = NotificationService()

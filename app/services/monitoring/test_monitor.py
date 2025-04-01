@@ -1,5 +1,3 @@
-# backend/app/services/monitoring/test_monitor.py
-
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 import logging
@@ -171,6 +169,24 @@ class TestMonitoringService:
             validated_data["speed"] = speed
             validated_data["timestamp"] = datetime.utcnow()
 
+        elif test_type == "brake":
+            force = float(data.get("force", 0))
+            efficiency = float(data.get("efficiency", 0))
+            if not (thresholds["min_force"] <= force <= thresholds["max_force"]):
+                raise MonitoringError(f"Brake force {force} out of valid range")
+            if efficiency < thresholds["min_efficiency"]:
+                raise MonitoringError(f"Brake efficiency {efficiency} below minimum")
+            validated_data["force"] = force
+            validated_data["efficiency"] = efficiency
+            validated_data["timestamp"] = datetime.utcnow()
+
+        elif test_type == "noise":
+            level = float(data.get("level", 0))
+            if level > thresholds["max_level"]:
+                raise MonitoringError(f"Noise level {level} exceeds maximum")
+            validated_data["level"] = level
+            validated_data["timestamp"] = datetime.utcnow()
+
         # Add validation for other test types...
 
         return validated_data
@@ -218,6 +234,32 @@ class TestMonitoringService:
 
         except Exception as e:
             logger.error(f"Session timeout handling error: {str(e)}")
+
+    async def _cleanup_session(self, session_id: str) -> None:
+        """Clean up session data and cancel monitoring tasks."""
+        try:
+            session = self.active_sessions.pop(session_id, None)
+            if session and "monitor_task" in session:
+                session["monitor_task"].cancel()
+            logger.info(f"Cleaned up session: {session_id}")
+        except Exception as e:
+            logger.error(f"Session cleanup error: {str(e)}")
+
+    async def _handle_session_error(self, session_id: str, error_message: str) -> None:
+        """Handle errors during session monitoring."""
+        try:
+            session = self.active_sessions.get(session_id)
+            if session:
+                await self._update_session_status(session_id, "error")
+                await notification_service.send_notification(
+                    user_id=str(session["data"]["operator_id"]),
+                    title="Test Session Error",
+                    message=f"Test session {session_id} encountered an error: {error_message}",
+                    notification_type="test_alert"
+                )
+                await self._cleanup_session(session_id)
+        except Exception as e:
+            logger.error(f"Session error handling failed: {str(e)}")
 
 # Initialize service
 test_monitoring_service = TestMonitoringService()

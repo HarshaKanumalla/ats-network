@@ -1,5 +1,3 @@
-# backend/app/services/location/service.py
-
 from typing import Dict, Any, List, Optional, Tuple
 import logging
 from datetime import datetime
@@ -20,6 +18,9 @@ class LocationService:
     def __init__(self):
         """Initialize location service with enhanced geocoding capabilities."""
         self.api_key = settings.google_maps_api_key
+        if not self.api_key:
+            raise LocationError("Google Maps API key is missing")
+
         self.geocoding_base_url = "https://maps.googleapis.com/maps/api/geocode/json"
         
         # Define India's geographical boundaries
@@ -149,6 +150,10 @@ class LocationService:
                 }
             )
 
+            if not nearby_centers:
+                logger.warning("No nearby centers found")
+                return []
+
             # Calculate exact distances and additional metadata
             for center in nearby_centers:
                 center_coords = center["location"]["coordinates"]
@@ -272,8 +277,16 @@ class LocationService:
         state: str
     ) -> bool:
         """Validate city exists in given state."""
-        # Implementation for city validation
-        return True
+        try:
+            city_data = await db_manager.execute_query(
+                collection="cities",
+                operation="find_one",
+                query={"city": city, "state": state}
+            )
+            return city_data is not None
+        except Exception as e:
+            logger.error(f"City validation error: {str(e)}")
+            return False
 
     def _validate_state(self, state: str) -> bool:
         """Validate Indian state name."""
@@ -287,6 +300,56 @@ class LocationService:
             "West Bengal"
         }
         return state in valid_states
+
+    def _get_from_cache(self, key: str) -> Optional[Dict[str, Any]]:
+        """Retrieve cached geocoding result if not expired."""
+        cached_entry = self.geocoding_cache.get(key)
+        if cached_entry and (datetime.utcnow() - cached_entry["timestamp"]).total_seconds() < self.cache_duration:
+            return cached_entry["data"]
+        return None
+
+    def _store_in_cache(self, key: str, data: Dict[str, Any]) -> None:
+        """Store geocoding result in cache with a timestamp."""
+        self.geocoding_cache[key] = {
+            "data": data,
+            "timestamp": datetime.utcnow()
+        }
+
+    def _estimate_travel_time(self, distance_km: float) -> str:
+        """Estimate travel time based on distance."""
+        try:
+            # Assume an average speed of 50 km/h
+            travel_time_hours = distance_km / 50
+            hours = int(travel_time_hours)
+            minutes = int((travel_time_hours - hours) * 60)
+            return f"{hours}h {minutes}m"
+        except Exception as e:
+            logger.error(f"Travel time estimation error: {str(e)}")
+            return "unavailable"
+
+    async def _log_geocoding_operation(
+        self,
+        address: str,
+        result: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+        success: bool = True
+    ) -> None:
+        """Log geocoding operation details."""
+        try:
+            log_entry = {
+                "address": address,
+                "result": result,
+                "error": error,
+                "success": success,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            await db_manager.execute_query(
+                collection="geocoding_logs",
+                operation="insert_one",
+                query=log_entry
+            )
+        except Exception as e:
+            logger.error(f"Geocoding log error: {str(e)}")
 
 # Initialize location service
 location_service = LocationService()

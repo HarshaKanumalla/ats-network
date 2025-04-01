@@ -26,34 +26,26 @@ router = APIRouter()
 
 @router.get("/health", response_model=SystemHealth)
 async def check_system_health(
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.VIEW_SYSTEM_HEALTH))
 ) -> SystemHealth:
-    """Check overall system health status.
-    
-    Args:
-        current_user: Authenticated user
-        
-    Returns:
-        Comprehensive system health status
-        
-    Raises:
-        HTTPException: If health check fails
-    """
+    """Check overall system health status."""
     try:
         health_status = await health_service.check_system_health()
-        
+
         metrics = {
             "cpu_usage": psutil.cpu_percent(),
             "memory_usage": psutil.virtual_memory().percent,
             "disk_usage": psutil.disk_usage('/').percent,
             "network_stats": psutil.net_io_counters()._asdict()
         }
-        
+
         database_status = await health_service.check_database_health()
         cache_status = await health_service.check_cache_health()
         storage_status = await health_service.check_storage_health()
-        
+
+        logger.info(f"System health check completed successfully at {datetime.utcnow()}")
+
         return SystemHealth(
             status="success",
             message="Health check completed successfully",
@@ -85,34 +77,31 @@ async def metrics_websocket(
     websocket: WebSocket,
     token: str
 ):
-    """WebSocket endpoint for real-time performance metrics.
-    
-    Args:
-        websocket: WebSocket connection
-        token: Authentication token
-    """
+    """WebSocket endpoint for real-time performance metrics."""
     try:
         # Verify token and permissions
         current_user = await verify_websocket_token(token)
         if not current_user:
+            logger.warning("WebSocket connection rejected: Invalid token")
             await websocket.close(code=4001)
             return
 
         # Accept connection
         await websocket.accept()
-        
+        logger.info(f"WebSocket connection established for user {current_user.id}")
+
         try:
             while True:
                 # Collect real-time metrics
                 metrics = await monitoring_service.collect_performance_metrics()
-                
+
                 # Send metrics to client
                 await websocket.send_json({
                     "type": "metrics",
                     "timestamp": datetime.utcnow().isoformat(),
                     "data": metrics
                 })
-                
+
                 # Wait before next update
                 await asyncio.sleep(settings.metrics_interval)
 
@@ -130,24 +119,14 @@ async def metrics_websocket(
 @router.get("/performance", response_model=PerformanceMetrics)
 async def get_performance_metrics(
     time_range: str = "1h",
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.VIEW_PERFORMANCE_METRICS))
 ) -> PerformanceMetrics:
-    """Get system performance metrics over time.
-    
-    Args:
-        time_range: Time range for metrics (1h, 24h, 7d)
-        current_user: Authenticated user
-        
-    Returns:
-        System performance metrics
-        
-    Raises:
-        HTTPException: If metrics retrieval fails
-    """
+    """Get system performance metrics over time."""
     try:
         metrics = await monitoring_service.get_performance_metrics(time_range)
-        
+
+        logger.info(f"Performance metrics retrieved successfully for time range {time_range}")
         return PerformanceMetrics(
             status="success",
             message="Performance metrics retrieved successfully",
@@ -164,27 +143,17 @@ async def get_performance_metrics(
 @router.post("/alerts/config", response_model=AlertConfig)
 async def configure_alerts(
     config: AlertConfig,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.MANAGE_ALERTS))
 ) -> AlertConfig:
-    """Configure system monitoring alerts.
-    
-    Args:
-        config: Alert configuration parameters
-        current_user: Authenticated user
-        
-    Returns:
-        Updated alert configuration
-        
-    Raises:
-        HTTPException: If configuration fails
-    """
+    """Configure system monitoring alerts."""
     try:
         updated_config = await monitoring_service.update_alert_config(
             config=config,
             updated_by=str(current_user.id)
         )
-        
+
+        logger.info(f"Alert configuration updated successfully by user {current_user.id}")
         return AlertConfig(
             status="success",
             message="Alert configuration updated successfully",
@@ -201,27 +170,17 @@ async def configure_alerts(
 @router.get("/centers/{center_id}", response_model=MonitoringResponse)
 async def monitor_center(
     center_id: str,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.MONITOR_CENTERS))
 ) -> MonitoringResponse:
-    """Monitor specific ATS center status and operations.
-    
-    Args:
-        center_id: ID of center to monitor
-        current_user: Authenticated user
-        
-    Returns:
-        Center monitoring data
-        
-    Raises:
-        HTTPException: If monitoring fails
-    """
+    """Monitor specific ATS center status and operations."""
     try:
         monitoring_data = await monitoring_service.monitor_center(
             center_id=center_id,
             user_role=current_user.role
         )
-        
+
+        logger.info(f"Monitoring data retrieved for center {center_id}")
         return MonitoringResponse(
             status="success",
             message="Center monitoring data retrieved successfully",
@@ -237,26 +196,17 @@ async def monitor_center(
 
 @router.get("/tests/active", response_model=MonitoringResponse)
 async def monitor_active_tests(
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.MONITOR_TESTS))
 ) -> MonitoringResponse:
-    """Monitor currently active test sessions.
-    
-    Args:
-        current_user: Authenticated user
-        
-    Returns:
-        Active test session monitoring data
-        
-    Raises:
-        HTTPException: If monitoring fails
-    """
+    """Monitor currently active test sessions."""
     try:
         active_tests = await monitoring_service.monitor_active_tests(
             user_role=current_user.role,
             center_id=current_user.center_id
         )
-        
+
+        logger.info(f"Active test monitoring data retrieved successfully for user {current_user.id}")
         return MonitoringResponse(
             status="success",
             message="Active test monitoring data retrieved successfully",
@@ -273,27 +223,17 @@ async def monitor_active_tests(
 @router.get("/equipment/{center_id}", response_model=MonitoringResponse)
 async def monitor_equipment(
     center_id: str,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.MONITOR_EQUIPMENT))
 ) -> MonitoringResponse:
-    """Monitor testing equipment status and calibration.
-    
-    Args:
-        center_id: ID of center
-        current_user: Authenticated user
-        
-    Returns:
-        Equipment monitoring data
-        
-    Raises:
-        HTTPException: If monitoring fails
-    """
+    """Monitor testing equipment status and calibration."""
     try:
         equipment_status = await monitoring_service.monitor_equipment(
             center_id=center_id,
             user_role=current_user.role
         )
-        
+
+        logger.info(f"Equipment monitoring data retrieved successfully for center {center_id}")
         return MonitoringResponse(
             status="success",
             message="Equipment monitoring data retrieved successfully",
@@ -312,23 +252,10 @@ async def get_monitoring_audit_logs(
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
     log_type: Optional[str] = None,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.VIEW_AUDIT_LOGS))
 ) -> MonitoringResponse:
-    """Get system monitoring audit logs.
-    
-    Args:
-        start_date: Optional start date filter
-        end_date: Optional end date filter
-        log_type: Optional log type filter
-        current_user: Authenticated user
-        
-    Returns:
-        Filtered audit logs
-        
-    Raises:
-        HTTPException: If log retrieval fails
-    """
+    """Get system monitoring audit logs."""
     try:
         logs = await monitoring_service.get_audit_logs(
             start_date=start_date,
@@ -336,7 +263,8 @@ async def get_monitoring_audit_logs(
             log_type=log_type,
             user_role=current_user.role
         )
-        
+
+        logger.info(f"Audit logs retrieved successfully for user {current_user.id}")
         return MonitoringResponse(
             status="success",
             message="Audit logs retrieved successfully",

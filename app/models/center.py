@@ -3,7 +3,8 @@
 """ATS center-related data models and validation schemas."""
 from typing import Optional, List, Dict, Any
 from pydantic import EmailStr, Field, field_validator
-from datetime import datetime
+from datetime import datetime, time
+import re
 
 from .common import AuditedModel, PyObjectId
 from .location import Location
@@ -45,6 +46,40 @@ class CenterBase(AuditedModel):
     capacity_per_day: int = Field(default=50, ge=1, le=200)
     is_active: bool = Field(default=True)
 
+    @field_validator('working_hours')
+    def validate_working_hours(cls, v):
+        """Validate working hours format."""
+        valid_days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+        time_pattern = r'^([01]?[0-9]|2[0-3]):[0-5][0-9]-([01]?[0-9]|2[0-3]):[0-5][0-9]$|^closed$'
+        
+        if not all(day in v for day in valid_days):
+            raise ValueError("All days of week must be specified")
+            
+        for day, hours in v.items():
+            if hours.lower() != 'closed' and not re.match(time_pattern, hours):
+                raise ValueError(f"Invalid time format for {day}: {hours}")
+            
+            if hours.lower() != 'closed':
+                start, end = hours.split('-')
+                start_time = datetime.strptime(start, '%H:%M').time()
+                end_time = datetime.strptime(end, '%H:%M').time()
+                if end_time <= start_time:
+                    raise ValueError(f"End time must be after start time for {day}")
+        return v
+
+    @field_validator('location')
+    def validate_location(cls, v):
+        """Validate location coordinates."""
+        if not (-90 <= v.latitude <= 90) or not (-180 <= v.longitude <= 180):
+            raise ValueError("Invalid coordinates")
+        return v
+
+    class Config:
+        validate_assignment = True
+        min_capacity = 1
+        max_capacity = 200
+        working_hour_format = r'^([01]?[0-9]|2[0-3]):[0-5][0-9]-([01]?[0-9]|2[0-3]):[0-5][0-9]$'
+
 class CenterCreate(CenterBase):
     """Model for creating a new ATS center."""
     
@@ -79,6 +114,8 @@ class CenterUpdate(CenterBase):
 
 class CenterInDB(CenterBase):
     """Internal center model with additional fields."""
+    
+    VALID_STATUSES = ['pending', 'approved', 'rejected', 'suspended']
     
     owner_id: PyObjectId
     business_license: str
@@ -141,6 +178,54 @@ class CenterInDB(CenterBase):
     # Staff members
     staff_members: List[PyObjectId] = Field(default_factory=list)
     
+    @field_validator('approval_status')
+    def validate_status_transition(cls, v):
+        """Validate status transitions."""
+        if v not in cls.VALID_STATUSES:
+            raise ValueError(f"Invalid status. Must be one of: {cls.VALID_STATUSES}")
+        return v
+
+    @field_validator('equipment_details')
+    def validate_equipment(cls, v):
+        """Validate equipment details."""
+        required_equipment = ['speed', 'brake', 'noise', 'headlight', 'axle']
+        if not all(eq in v for eq in required_equipment):
+            raise ValueError("All required equipment must be specified")
+            
+        for equip in v.values():
+            if not isinstance(equip, dict):
+                raise ValueError("Invalid equipment details format")
+            required_fields = ['serial_number', 'last_calibration', 'next_calibration', 'status']
+            if not all(field in equip for field in required_fields):
+                raise ValueError("Missing required equipment fields")
+        return v
+
+    def update_test_statistics(self, test_result: Dict[str, Any]) -> None:
+        """Update center test statistics with new test result."""
+        current_time = datetime.utcnow()
+        
+        self.test_statistics["total_tests"] += 1
+        
+        # Update daily stats
+        if current_time.date() == self.test_statistics["last_updated"].date():
+            self.test_statistics["tests_today"] += 1
+        else:
+            self.test_statistics["tests_today"] = 1
+            
+        # Update monthly stats
+        if current_time.month == self.test_statistics["last_updated"].month:
+            self.test_statistics["tests_this_month"] += 1
+        else:
+            self.test_statistics["tests_this_month"] = 1
+            
+        # Update vehicle age statistics
+        if test_result.get("vehicle_age", 0) <= 8:
+            self.test_statistics["vehicles_under_8"] += 1
+        else:
+            self.test_statistics["vehicles_over_8"] += 1
+            
+        self.test_statistics["last_updated"] = current_time
+
     class Config:
         json_encoders = {
             datetime: lambda dt: dt.isoformat() if dt else None,
@@ -167,7 +252,6 @@ class CenterResponse(CenterBase):
     def dict(self, *args, **kwargs):
         """Customize dictionary representation."""
         d = super().dict(*args, **kwargs)
-        # Transform equipment details into simple status
         if 'equipment_details' in d:
             d['equipment_status'] = {
                 key: details['status']
@@ -197,6 +281,20 @@ class CenterStatistics(AuditedModel):
     # Time period
     start_date: datetime
     end_date: datetime
+
+    @field_validator('success_rate', 'utilization_rate')
+    def validate_rates(cls, v):
+        """Validate rate percentages."""
+        if not (0 <= v <= 100):
+            raise ValueError("Rate must be between 0 and 100")
+        return v
+
+    @field_validator('end_date')
+    def validate_dates(cls, v, values):
+        """Validate date ranges."""
+        if 'start_date' in values and v < values['start_date']:
+            raise ValueError("End date cannot be before start date")
+        return v
     
     class Config:
         json_encoders = {
@@ -225,6 +323,13 @@ class CenterEquipment(AuditedModel):
     
     # Document references
     documents: List[str] = Field(default_factory=list)
+
+    @field_validator('next_calibration')
+    def validate_calibration_dates(cls, v, values):
+        """Validate calibration date sequence."""
+        if 'last_calibration' in values and v <= values['last_calibration']:
+            raise ValueError("Next calibration must be after last calibration")
+        return v
     
     class Config:
         json_encoders = {
@@ -234,6 +339,9 @@ class CenterEquipment(AuditedModel):
 
 class CenterDocument(AuditedModel):
     """Center document management model."""
+    
+    VALID_STATUSES = ['pending', 'verified', 'rejected']
+    ALLOWED_MIME_TYPES = ['application/pdf', 'image/jpeg', 'image/png']
     
     center_id: PyObjectId
     document_type: str = Field(..., description="Type of document")
@@ -247,6 +355,20 @@ class CenterDocument(AuditedModel):
     verified_by: Optional[PyObjectId] = None
     verified_at: Optional[datetime] = None
     verification_notes: Optional[str] = None
+
+    @field_validator('verification_status')
+    def validate_verification_status(cls, v):
+        """Validate document verification status."""
+        if v not in cls.VALID_STATUSES:
+            raise ValueError(f"Invalid status. Must be one of: {cls.VALID_STATUSES}")
+        return v
+        
+    @field_validator('mime_type')
+    def validate_mime_type(cls, v):
+        """Validate document mime type."""
+        if v not in cls.ALLOWED_MIME_TYPES:
+            raise ValueError(f"Invalid mime type. Must be one of: {cls.ALLOWED_MIME_TYPES}")
+        return v
     
     class Config:
         json_encoders = {

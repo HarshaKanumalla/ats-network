@@ -1,5 +1,3 @@
-# backend/app/services/report/service.py
-
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 import logging
@@ -114,11 +112,13 @@ class ReportService:
                     "test_report",
                     report_data
                 )
-            else:
+            elif report_format == "html":
                 report_content = await self._generate_html_report(
                     "test_report",
                     report_data
                 )
+            else:
+                raise ReportError(f"Unsupported report format: {report_format}")
             
             # Store report in S3
             report_url = await s3_service.upload_document(
@@ -209,6 +209,8 @@ class ReportService:
                     "center_performance",
                     report_data
                 )
+            else:
+                raise ReportError(f"Unsupported report format: {report_format}")
             
             # Store report
             filename = (
@@ -311,13 +313,15 @@ class ReportService:
         """Generate Excel format report."""
         try:
             # Convert data to DataFrame
-            df = pd.DataFrame(report_data)
+            df = pd.DataFrame([report_data])
             
             # Generate Excel file
-            excel_content = df.to_excel(
-                index=False,
-                engine='xlsxwriter'
-            )
+            excel_buffer = pd.ExcelWriter("temp.xlsx", engine="xlsxwriter")
+            df.to_excel(excel_buffer, index=False)
+            excel_buffer.close()
+            
+            with open("temp.xlsx", "rb") as f:
+                excel_content = f.read()
             
             return excel_content
             

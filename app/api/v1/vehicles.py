@@ -29,35 +29,19 @@ router = APIRouter()
 async def register_vehicle(
     vehicle_data: VehicleCreate,
     documents: List[UploadFile] = File(...),
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.REGISTER_VEHICLES))
 ) -> VehicleResponse:
-    """Register a new vehicle with document verification.
-    
-    Args:
-        vehicle_data: Vehicle registration information
-        documents: Required vehicle documents
-        current_user: Authenticated user
-        
-    Returns:
-        Created vehicle information
-        
-    Raises:
-        HTTPException: If registration fails or validation errors occur
-    """
+    """Register a new vehicle with document verification."""
     try:
         # Validate registration number format and uniqueness
-        if not vehicle_service.validate_registration_number(
-            vehicle_data.registration_number
-        ):
+        if not vehicle_service.validate_registration_number(vehicle_data.registration_number):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid vehicle registration number format"
             )
 
-        if await vehicle_service.get_vehicle_by_registration(
-            vehicle_data.registration_number
-        ):
+        if await vehicle_service.get_vehicle_by_registration(vehicle_data.registration_number):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Vehicle already registered"
@@ -84,7 +68,7 @@ async def register_vehicle(
             owner_email=vehicle_data.owner_info.email
         )
 
-        logger.info(f"Registered vehicle: {vehicle.registration_number}")
+        logger.info(f"Vehicle registered successfully: {vehicle.registration_number[:5]}***")
         return VehicleResponse(
             status="success",
             message="Vehicle registered successfully",
@@ -103,21 +87,10 @@ async def register_vehicle(
 @router.get("/search", response_model=List[VehicleResponse])
 async def search_vehicles(
     filters: VehicleFilter = Depends(),
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.VIEW_VEHICLES))
 ) -> List[VehicleResponse]:
-    """Search vehicles based on various criteria with role-based filtering.
-    
-    Args:
-        filters: Search and filtering criteria
-        current_user: Authenticated user
-        
-    Returns:
-        List of matching vehicles
-        
-    Raises:
-        HTTPException: If search fails
-    """
+    """Search vehicles based on various criteria with role-based filtering."""
     try:
         vehicles = await vehicle_service.search_vehicles(
             filters=filters,
@@ -125,6 +98,7 @@ async def search_vehicles(
             center_id=current_user.center_id
         )
 
+        logger.info(f"Vehicles retrieved successfully by user ID: {current_user.id}")
         return [
             VehicleResponse(
                 status="success",
@@ -143,21 +117,10 @@ async def search_vehicles(
 @router.get("/{vehicle_id}", response_model=VehicleResponse)
 async def get_vehicle(
     vehicle_id: str,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.VIEW_VEHICLES))
 ) -> VehicleResponse:
-    """Get detailed vehicle information including test history.
-    
-    Args:
-        vehicle_id: ID of vehicle
-        current_user: Authenticated user
-        
-    Returns:
-        Vehicle details
-        
-    Raises:
-        HTTPException: If retrieval fails
-    """
+    """Get detailed vehicle information including test history."""
     try:
         vehicle = await vehicle_service.get_vehicle_details(
             vehicle_id=vehicle_id,
@@ -171,6 +134,7 @@ async def get_vehicle(
                 detail="Vehicle not found"
             )
 
+        logger.info(f"Vehicle retrieved successfully: {vehicle_id[:5]}***")
         return VehicleResponse(
             status="success",
             message="Vehicle retrieved successfully",
@@ -190,28 +154,14 @@ async def get_vehicle(
 async def update_vehicle(
     vehicle_id: str,
     updates: VehicleUpdate,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.MANAGE_VEHICLES))
 ) -> VehicleResponse:
-    """Update vehicle information.
-    
-    Args:
-        vehicle_id: ID of vehicle to update
-        updates: Updated vehicle information
-        current_user: Authenticated user
-        
-    Returns:
-        Updated vehicle information
-        
-    Raises:
-        HTTPException: If update fails
-    """
+    """Update vehicle information."""
     try:
         # Validate registration number if provided
         if updates.registration_number:
-            if not vehicle_service.validate_registration_number(
-                updates.registration_number
-            ):
+            if not vehicle_service.validate_registration_number(updates.registration_number):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Invalid vehicle registration number format"
@@ -223,6 +173,7 @@ async def update_vehicle(
             updated_by=str(current_user.id)
         )
 
+        logger.info(f"Vehicle updated successfully: {vehicle_id[:5]}***")
         return VehicleResponse(
             status="success",
             message="Vehicle updated successfully",
@@ -243,23 +194,10 @@ async def update_vehicle_documents(
     vehicle_id: str,
     document_type: str,
     document: UploadFile = File(...),
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.MANAGE_VEHICLES))
 ) -> VehicleResponse:
-    """Update vehicle documentation.
-    
-    Args:
-        vehicle_id: ID of vehicle
-        document_type: Type of document being updated
-        document: New document file
-        current_user: Authenticated user
-        
-    Returns:
-        Updated vehicle information
-        
-    Raises:
-        HTTPException: If update fails
-    """
+    """Update vehicle documentation."""
     try:
         # Validate document type
         if not document_service.validate_document_type(document_type):
@@ -284,6 +222,7 @@ async def update_vehicle_documents(
             updated_by=str(current_user.id)
         )
 
+        logger.info(f"Document updated successfully for vehicle ID: {vehicle_id[:5]}***")
         return VehicleResponse(
             status="success",
             message="Document updated successfully",
@@ -302,21 +241,10 @@ async def update_vehicle_documents(
 @router.get("/{vehicle_id}/test-history", response_model=List[Dict[str, Any]])
 async def get_vehicle_test_history(
     vehicle_id: str,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.VIEW_TEST_HISTORY))
 ) -> List[Dict[str, Any]]:
-    """Get complete test history for a vehicle.
-    
-    Args:
-        vehicle_id: ID of vehicle
-        current_user: Authenticated user
-        
-    Returns:
-        List of test sessions and results
-        
-    Raises:
-        HTTPException: If retrieval fails
-    """
+    """Get complete test history for a vehicle."""
     try:
         history = await vehicle_service.get_test_history(
             vehicle_id=vehicle_id,
@@ -324,6 +252,7 @@ async def get_vehicle_test_history(
             center_id=current_user.center_id
         )
 
+        logger.info(f"Test history retrieved successfully for vehicle ID: {vehicle_id[:5]}***")
         return history
 
     except Exception as e:
@@ -338,23 +267,10 @@ async def get_center_vehicle_statistics(
     center_id: str,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.VIEW_STATISTICS))
 ) -> Dict[str, Any]:
-    """Get vehicle statistics for a specific center.
-    
-    Args:
-        center_id: ID of center
-        start_date: Optional start date for statistics
-        end_date: Optional end date for statistics
-        current_user: Authenticated user
-        
-    Returns:
-        Vehicle statistics for center
-        
-    Raises:
-        HTTPException: If retrieval fails
-    """
+    """Get vehicle statistics for a specific center."""
     try:
         # Verify center access
         if not await vehicle_service.can_access_center_statistics(
@@ -372,6 +288,7 @@ async def get_center_vehicle_statistics(
             end_date=end_date
         )
 
+        logger.info(f"Statistics retrieved successfully for center ID: {center_id}")
         return {
             "status": "success",
             "message": "Statistics retrieved successfully",
@@ -393,24 +310,10 @@ async def verify_vehicle_documents(
     document_type: str,
     verification_status: str,
     verification_notes: Optional[str] = None,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.VERIFY_DOCUMENTS))
 ) -> VehicleResponse:
-    """Verify vehicle documents.
-    
-    Args:
-        vehicle_id: ID of vehicle
-        document_type: Type of document to verify
-        verification_status: New verification status
-        verification_notes: Optional verification notes
-        current_user: Authenticated user
-        
-    Returns:
-        Updated vehicle information
-        
-    Raises:
-        HTTPException: If verification fails
-    """
+    """Verify vehicle documents."""
     try:
         updated_vehicle = await vehicle_service.verify_document(
             vehicle_id=vehicle_id,
@@ -429,6 +332,7 @@ async def verify_vehicle_documents(
                 notes=verification_notes
             )
 
+        logger.info(f"Document verification updated successfully for vehicle ID: {vehicle_id[:5]}***")
         return VehicleResponse(
             status="success",
             message="Document verification updated successfully",

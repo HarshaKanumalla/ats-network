@@ -1,7 +1,8 @@
-#backend/app/core/constants.py
+# backend/app/core/constants.py
 
-from enum import Enum, auto
+from enum import Enum
 
+# User Roles
 class UserRole(str, Enum):
     """User role definitions for the ATS system."""
     TRANSPORT_COMMISSIONER = "transport_commissioner"
@@ -11,6 +12,7 @@ class UserRole(str, Enum):
     ATS_ADMIN = "ats_admin"
     ATS_TESTING = "ats_testing"
 
+# User Status
 class UserStatus(str, Enum):
     """User account status definitions."""
     PENDING = "pending"
@@ -18,6 +20,7 @@ class UserStatus(str, Enum):
     SUSPENDED = "suspended"
     INACTIVE = "inactive"
 
+# Test Types
 class TestType(str, Enum):
     """Vehicle test type definitions."""
     SPEED = "speed_test"
@@ -26,6 +29,7 @@ class TestType(str, Enum):
     HEADLIGHT = "headlight_test"
     AXLE = "axle_test"
 
+# Test Status
 class TestStatus(str, Enum):
     """Test session status definitions."""
     SCHEDULED = "scheduled"
@@ -34,6 +38,7 @@ class TestStatus(str, Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
 
+# Center Status
 class CenterStatus(str, Enum):
     """ATS center status definitions."""
     PENDING = "pending"
@@ -41,6 +46,7 @@ class CenterStatus(str, Enum):
     SUSPENDED = "suspended"
     INACTIVE = "inactive"
 
+# Document Types
 class DocumentType(str, Enum):
     """Document type definitions."""
     REGISTRATION = "registration"
@@ -50,6 +56,7 @@ class DocumentType(str, Enum):
     CALIBRATION = "calibration"
     CENTER_APPROVAL = "center_approval"
 
+# Notification Types
 class NotificationType(str, Enum):
     """Notification type definitions."""
     TEST_COMPLETE = "test_complete"
@@ -82,7 +89,11 @@ STORAGE_PATH_TEMP = "temp/"
 MAX_FILE_SIZE_MB = 10
 MAX_IMAGE_SIZE_MB = 5
 ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png"]
-ALLOWED_DOCUMENT_TYPES = ["application/pdf", "application/msword"]
+ALLOWED_DOCUMENT_TYPES = [
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+]
 PASSWORD_MIN_LENGTH = 8
 USERNAME_MIN_LENGTH = 3
 

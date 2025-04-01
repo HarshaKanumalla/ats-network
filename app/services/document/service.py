@@ -1,11 +1,10 @@
-# backend/app/services/document/service.py
-
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 import logging
 from bson import ObjectId
 import hashlib
 import json
+import asyncio
 
 from ...core.exceptions import DocumentError
 from ...services.s3.s3_service import s3_service
@@ -85,6 +84,27 @@ class DocumentService:
         
         logger.info("Document service initialized")
 
+    async def _get_database(self):
+        """Get database connection with error handling."""
+        try:
+            return await get_database()
+        except Exception as e:
+            logger.error(f"Database connection error: {str(e)}")
+            raise DocumentError("Failed to connect to the database")
+
+    async def _retry_s3_operation(self, operation: callable, *args, retries: int = 3, **kwargs):
+        """Retry S3 operation in case of transient failures."""
+        for attempt in range(retries):
+            try:
+                return await operation(*args, **kwargs)
+            except Exception as e:
+                if attempt < retries - 1:
+                    logger.warning(f"S3 operation failed, retrying... ({attempt + 1}/{retries})")
+                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                else:
+                    logger.error(f"S3 operation failed after {retries} retries: {str(e)}")
+                    raise DocumentError("S3 operation failed")
+
     async def process_document(
         self,
         document_type: str,
@@ -109,7 +129,8 @@ class DocumentService:
             )
 
             # Store file in S3
-            file_url = await s3_service.upload_document(
+            file_url = await self._retry_s3_operation(
+                s3_service.upload_document,
                 file=file,
                 folder=f"documents/{document_type}/{document_id}",
                 metadata={
@@ -143,12 +164,8 @@ class DocumentService:
 
             # Store record in database
             async with database_transaction() as session:
-                await db_manager.execute_query(
-                    collection="documents",
-                    operation="insert_one",
-                    query=document_record,
-                    session=session
-                )
+                db = await self._get_database()
+                await db.documents.insert_one(document_record, session=session)
 
                 # Create document history entry
                 await self._create_history_entry(
@@ -182,7 +199,7 @@ class DocumentService:
     ) -> Dict[str, Any]:
         """Verify document with proper authorization."""
         try:
-            db = await get_database()
+            db = await self._get_database()
             
             # Get document record
             document = await db.documents.find_one({
@@ -249,7 +266,7 @@ class DocumentService:
     ) -> Dict[str, Any]:
         """Add digital signature to document."""
         try:
-            db = await get_database()
+            db = await self._get_database()
             
             # Get document record
             document = await db.documents.find_one({
@@ -366,6 +383,7 @@ class DocumentService:
     ) -> None:
         """Create document history entry."""
         try:
+            db = await self._get_database()
             history_entry = {
                 "document_id": document_id,
                 "action": action,
@@ -374,16 +392,46 @@ class DocumentService:
                 "timestamp": datetime.utcnow()
             }
 
-            await db_manager.execute_query(
-                collection="document_history",
-                operation="insert_one",
-                query=history_entry,
-                session=session
-            )
+            await db.document_history.insert_one(history_entry, session=session)
 
         except Exception as e:
             logger.error(f"History entry creation error: {str(e)}")
-            logger.warning("Failed to create document history entry")
+            raise DocumentError("Failed to create document history entry")
+
+    async def _schedule_expiry_check(self, document_id: str, expiry_date: str) -> None:
+        """Schedule a task to handle document expiry."""
+        try:
+            expiry_datetime = datetime.strptime(expiry_date, "%Y-%m-%d")
+            if expiry_datetime < datetime.utcnow():
+                raise DocumentError("Expiry date is in the past")
+
+            # Schedule expiry notification
+            await notification_service.schedule_notification(
+                {
+                    "document_id": document_id,
+                    "expiry_date": expiry_datetime,
+                    "message": f"Document {document_id} is about to expire."
+                }
+            )
+            logger.info(f"Scheduled expiry check for document: {document_id}")
+        except Exception as e:
+            logger.error(f"Expiry check scheduling error: {str(e)}")
+            raise DocumentError("Failed to schedule expiry check")
+
+    async def _verify_authorization(
+        self, user_id: str, document_type: str, action: str
+    ) -> bool:
+        """Verify if the user is authorized to perform the action on the document."""
+        try:
+            allowed_roles = self.signature_requirements.get(document_type, [])
+            db = await self._get_database()
+            user = await db.users.find_one({"_id": ObjectId(user_id)})
+            if not user or user.get("role") not in allowed_roles:
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"Authorization verification error: {str(e)}")
+            return False
 
 # Initialize document service
 document_service = DocumentService()

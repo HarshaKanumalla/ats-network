@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from typing import List, Optional, Dict, Any
 import logging
 from datetime import datetime, timedelta
-from bson import ObjectId
+from pydantic import BaseModel, EmailStr, Field
 
 from ...core.auth.permissions import RolePermission, require_permission
 from ...core.security import get_current_user
@@ -23,26 +23,18 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 router = APIRouter()
 
+class ShareReportRequest(BaseModel):
+    recipients: List[EmailStr]
+    message: Optional[str] = Field(None, max_length=500, description="Optional sharing message")
+
 @router.post("/generate", response_model=ReportResponse)
 async def generate_report(
     report_request: ReportRequest,
     background_tasks: BackgroundTasks,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.GENERATE_REPORTS))
 ) -> ReportResponse:
-    """Generate a custom report based on specified parameters.
-    
-    Args:
-        report_request: Report generation parameters
-        background_tasks: Background task manager
-        current_user: Authenticated user
-        
-    Returns:
-        Report generation status and information
-        
-    Raises:
-        HTTPException: If report generation fails
-    """
+    """Generate a custom report based on specified parameters."""
     try:
         # Validate report parameters
         await report_service.validate_report_parameters(
@@ -74,6 +66,8 @@ async def generate_report(
             report_job_id=str(report_job.id)
         )
 
+        logger.info(f"Report generation initiated for user {current_user.id}")
+
         return ReportResponse(
             status="success",
             message="Report generation initiated successfully",
@@ -95,26 +89,16 @@ async def generate_report(
 @router.get("/status/{job_id}", response_model=ReportResponse)
 async def get_report_status(
     job_id: str,
-    current_user = Depends(get_current_user)
+    current_user=Depends(get_current_user)
 ) -> ReportResponse:
-    """Get status of a report generation job.
-    
-    Args:
-        job_id: ID of report generation job
-        current_user: Authenticated user
-        
-    Returns:
-        Report generation status
-        
-    Raises:
-        HTTPException: If status retrieval fails
-    """
+    """Get status of a report generation job."""
     try:
         status = await report_service.get_report_status(
             job_id=job_id,
             user_id=str(current_user.id)
         )
 
+        logger.info(f"Report status retrieved successfully for job ID: {job_id[:5]}***")
         return ReportResponse(
             status="success",
             message="Report status retrieved successfully",
@@ -131,27 +115,17 @@ async def get_report_status(
 @router.post("/schedule", response_model=ReportResponse)
 async def schedule_report(
     schedule: ReportSchedule,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.SCHEDULE_REPORTS))
 ) -> ReportResponse:
-    """Schedule automated report generation.
-    
-    Args:
-        schedule: Report scheduling parameters
-        current_user: Authenticated user
-        
-    Returns:
-        Scheduled report information
-        
-    Raises:
-        HTTPException: If scheduling fails
-    """
+    """Schedule automated report generation."""
     try:
         scheduled_report = await report_service.schedule_report(
             schedule=schedule,
             user_id=str(current_user.id)
         )
 
+        logger.info(f"Report scheduled successfully by user {current_user.id}")
         return ReportResponse(
             status="success",
             message="Report scheduled successfully",
@@ -167,25 +141,16 @@ async def schedule_report(
 
 @router.get("/templates", response_model=List[ReportTemplate])
 async def get_report_templates(
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.VIEW_REPORT_TEMPLATES))
 ) -> List[ReportTemplate]:
-    """Get available report templates based on user role.
-    
-    Args:
-        current_user: Authenticated user
-        
-    Returns:
-        List of available report templates
-        
-    Raises:
-        HTTPException: If template retrieval fails
-    """
+    """Get available report templates based on user role."""
     try:
         templates = await report_service.get_available_templates(
             user_role=current_user.role
         )
 
+        logger.info(f"Report templates retrieved successfully for user {current_user.id}")
         return templates
 
     except Exception as e:
@@ -198,27 +163,17 @@ async def get_report_templates(
 @router.post("/templates", response_model=ReportTemplate)
 async def create_report_template(
     template: ReportTemplate,
-    current_user = Depends(get_current_user),
+    current_user=Depends(get_current_user),
     _=Depends(require_permission(RolePermission.MANAGE_REPORT_TEMPLATES))
 ) -> ReportTemplate:
-    """Create a new report template.
-    
-    Args:
-        template: Report template definition
-        current_user: Authenticated user
-        
-    Returns:
-        Created template information
-        
-    Raises:
-        HTTPException: If template creation fails
-    """
+    """Create a new report template."""
     try:
         created_template = await report_service.create_template(
             template=template,
             created_by=str(current_user.id)
         )
 
+        logger.info(f"Report template created successfully by user {current_user.id}")
         return created_template
 
     except Exception as e:
@@ -233,22 +188,9 @@ async def get_report_history(
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
     report_type: Optional[str] = None,
-    current_user = Depends(get_current_user)
+    current_user=Depends(get_current_user)
 ) -> List[ReportResponse]:
-    """Get user's report generation history.
-    
-    Args:
-        start_date: Optional start date filter
-        end_date: Optional end date filter
-        report_type: Optional report type filter
-        current_user: Authenticated user
-        
-    Returns:
-        List of generated reports
-        
-    Raises:
-        HTTPException: If history retrieval fails
-    """
+    """Get user's report generation history."""
     try:
         history = await report_service.get_report_history(
             user_id=str(current_user.id),
@@ -257,6 +199,7 @@ async def get_report_history(
             report_type=report_type
         )
 
+        logger.info(f"Report history retrieved successfully for user {current_user.id}")
         return [
             ReportResponse(
                 status="success",
@@ -275,20 +218,9 @@ async def get_report_history(
 @router.get("/download/{report_id}")
 async def download_report(
     report_id: str,
-    current_user = Depends(get_current_user)
+    current_user=Depends(get_current_user)
 ) -> Dict[str, str]:
-    """Get download URL for a generated report.
-    
-    Args:
-        report_id: ID of generated report
-        current_user: Authenticated user
-        
-    Returns:
-        Report download URL
-        
-    Raises:
-        HTTPException: If download URL generation fails
-    """
+    """Get download URL for a generated report."""
     try:
         # Verify report access
         if not await report_service.can_access_report(
@@ -302,6 +234,7 @@ async def download_report(
 
         download_url = await report_service.get_report_download_url(report_id)
 
+        logger.info(f"Download URL generated successfully for report ID: {report_id[:5]}***")
         return {
             "status": "success",
             "message": "Download URL generated successfully",
@@ -320,24 +253,10 @@ async def download_report(
 @router.post("/share/{report_id}")
 async def share_report(
     report_id: str,
-    recipients: List[str],
-    message: Optional[str] = None,
-    current_user = Depends(get_current_user)
+    share_request: ShareReportRequest,
+    current_user=Depends(get_current_user)
 ) -> Dict[str, Any]:
-    """Share a generated report with other users.
-    
-    Args:
-        report_id: ID of report to share
-        recipients: List of recipient email addresses
-        message: Optional sharing message
-        current_user: Authenticated user
-        
-    Returns:
-        Sharing operation status
-        
-    Raises:
-        HTTPException: If sharing fails
-    """
+    """Share a generated report with other users."""
     try:
         # Verify report access
         if not await report_service.can_share_report(
@@ -351,11 +270,12 @@ async def share_report(
 
         share_results = await report_service.share_report(
             report_id=report_id,
-            recipients=recipients,
-            message=message,
+            recipients=share_request.recipients,
+            message=share_request.message,
             shared_by=str(current_user.id)
         )
 
+        logger.info(f"Report shared successfully for report ID: {report_id[:5]}***")
         return {
             "status": "success",
             "message": "Report shared successfully",

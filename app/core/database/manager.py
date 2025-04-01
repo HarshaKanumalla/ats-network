@@ -6,9 +6,10 @@ import logging
 from datetime import datetime
 import backoff
 from pymongo.errors import (
-    ConnectionFailure, 
+    ConnectionFailure,
     OperationFailure,
-    ServerSelectionTimeoutError
+    ServerSelectionTimeoutError,
+    CollectionInvalid
 )
 
 from .migration_manager import MigrationManager
@@ -18,16 +19,17 @@ from ...config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+
 class DatabaseManager:
     """Manages database connections and operations with migration support."""
-    
+
     def __init__(self):
         """Initialize database manager with configuration settings."""
         self._client: Optional[AsyncIOMotorClient] = None
         self._db: Optional[AsyncIOMotorDatabase] = None
         self.migration_manager: Optional[MigrationManager] = None
         self.connected = False
-        
+
         # Connection pool settings
         self.connection_settings = {
             'min_pool_size': settings.MONGODB_MIN_POOL_SIZE,
@@ -39,7 +41,7 @@ class DatabaseManager:
             'retry_writes': True,
             'w': 'majority'
         }
-        
+
         logger.info("Database manager initialized")
 
     @backoff.on_exception(
@@ -62,32 +64,35 @@ class DatabaseManager:
 
             # Test connection
             await self._client.admin.command('ping')
-            
+
             # Initialize database
             self._db = self._client[settings.MONGODB_DB_NAME]
-            
+
             # Initialize migration manager
             self.migration_manager = MigrationManager(self._db)
-            
+
             # Run initial setup and migrations
             await self._initialize_database()
-            
+
             self.connected = True
             logger.info(f"Connected to MongoDB: {settings.MONGODB_DB_NAME}")
 
-        except Exception as e:
+        except (ConnectionFailure, ServerSelectionTimeoutError) as e:
             logger.error(f"Database connection error: {str(e)}")
             raise DatabaseError(f"Failed to connect to database: {str(e)}")
+        except Exception as e:
+            logger.error(f"Unexpected error during database connection: {str(e)}")
+            raise DatabaseError(f"Unexpected error: {str(e)}")
 
     async def _initialize_database(self) -> None:
         """Initialize database with schema validation and run migrations."""
         try:
             # Initialize database with schema validation
             await self.migration_manager.initialize_database()
-            
+
             # Run pending migrations
             await self.migration_manager.run_migrations()
-            
+
             logger.info("Database initialization completed")
 
         except Exception as e:
@@ -152,13 +157,17 @@ class DatabaseManager:
                     session=session,
                     **(options or {})
                 )
+            elif operation == 'aggregate':
+                cursor = collection_obj.aggregate(query, **(options or {}))
+                result = await cursor.to_list(None)
             else:
                 raise DatabaseError(f"Unsupported operation: {operation}")
 
+            logger.info(f"Query executed successfully on collection: {collection}, operation: {operation}")
             return result
 
         except Exception as e:
-            logger.error(f"Query execution error: {str(e)}")
+            logger.error(f"Query execution error on collection {collection}, operation {operation}: {str(e)}")
             raise DatabaseError(f"Failed to execute query: {str(e)}")
 
     async def create_collection(
@@ -178,8 +187,11 @@ class DatabaseManager:
             )
             logger.info(f"Created collection: {name}")
 
-        except Exception as e:
+        except CollectionInvalid as e:
             logger.error(f"Collection creation error: {str(e)}")
+            raise DatabaseError(f"Collection already exists: {str(e)}")
+        except Exception as e:
+            logger.error(f"Unexpected error during collection creation: {str(e)}")
             raise DatabaseError(f"Failed to create collection: {str(e)}")
 
     async def update_collection_schema(
@@ -199,8 +211,11 @@ class DatabaseManager:
             })
             logger.info(f"Updated schema for collection: {name}")
 
-        except Exception as e:
+        except OperationFailure as e:
             logger.error(f"Schema update error: {str(e)}")
+            raise DatabaseError(f"Failed to update schema: {str(e)}")
+        except Exception as e:
+            logger.error(f"Unexpected error during schema update: {str(e)}")
             raise DatabaseError(f"Failed to update schema: {str(e)}")
 
     async def check_health(self) -> Dict[str, Any]:
@@ -211,20 +226,28 @@ class DatabaseManager:
 
             # Check connection
             await self._client.admin.command('ping')
-            
+
             # Get database stats
             stats = await self._db.command('dbStats')
-            
+
+            # Check collections and indexes
+            collections = await self._db.list_collection_names()
+            collection_details = {}
+            for collection in collections:
+                indexes = await self._db[collection].index_information()
+                collection_details[collection] = {"indexes": indexes}
+
             return {
                 'status': 'healthy',
                 'connection': True,
-                'collections': await self._db.list_collection_names(),
+                'collections': collections,
                 'statistics': {
                     'collections': stats['collections'],
                     'objects': stats['objects'],
                     'dataSize': stats['dataSize'],
                     'storageSize': stats['storageSize']
-                }
+                },
+                'collection_details': collection_details
             }
 
         except Exception as e:
@@ -245,6 +268,7 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Connection closure error: {str(e)}")
             raise DatabaseError(f"Failed to close database connection: {str(e)}")
+
 
 # Initialize database manager
 db_manager = DatabaseManager()

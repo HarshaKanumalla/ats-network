@@ -1,5 +1,3 @@
-# backend/app/services/center/service.py
-
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 import logging
@@ -83,9 +81,7 @@ class CenterManagementService:
                 db = await get_database()
                 
                 # Verify center code uniqueness
-                if await db.centers.find_one({
-                    "centerCode": center_data.center_code
-                }):
+                if await db.centers.find_one({"centerCode": center_data.center_code}):
                     raise CenterError("Center code already exists")
                 
                 # Process and validate location
@@ -360,13 +356,59 @@ class CenterManagementService:
         except Exception as e:
             logger.error(f"Maintenance scheduling error: {str(e)}")
 
+    async def _schedule_calibration_reminder(
+        self,
+        center_id: str,
+        equipment_type: str,
+        next_calibration: datetime
+    ) -> None:
+        """Schedule a reminder for equipment calibration."""
+        try:
+            reminder_data = {
+                "centerId": center_id,
+                "equipmentType": equipment_type,
+                "reminderDate": next_calibration,
+                "message": f"Calibration due for {equipment_type} equipment."
+            }
+            await notification_service.schedule_reminder(reminder_data)
+            logger.info(f"Scheduled calibration reminder for {equipment_type} in center {center_id}")
+        except Exception as e:
+            logger.error(f"Calibration reminder scheduling error: {str(e)}")
+
+    async def _send_registration_notifications(self, center_doc: Dict[str, Any]) -> None:
+        """Send notifications for center registration."""
+        try:
+            notification_data = {
+                "title": "New Center Registration",
+                "message": f"Center {center_doc['centerName']} has been registered and is pending approval.",
+                "recipients": [center_doc["owner"]["userId"]]
+            }
+            await notification_service.send_notification(notification_data)
+            logger.info(f"Sent registration notification for center {center_doc['centerCode']}")
+        except Exception as e:
+            logger.error(f"Notification sending error: {str(e)}")
+
     def _validate_equipment_data(self, equipment: CenterEquipment) -> bool:
         """Validate equipment data against requirements."""
         try:
-            # Implementation for equipment validation
-            pass
+            if not equipment.equipment_type or not equipment.serial_number:
+                return False
+            if not equipment.manufacturer or not equipment.model:
+                return False
+            if not isinstance(equipment.calibration_data, dict):
+                return False
+            return True
         except Exception as e:
             logger.error(f"Equipment validation error: {str(e)}")
+            return False
+
+    def _validate_document_format(self, file: Any, allowed_formats: List[str]) -> bool:
+        """Validate the format of a document."""
+        try:
+            file_extension = file.filename.split(".")[-1].lower()
+            return file_extension in allowed_formats
+        except Exception as e:
+            logger.error(f"Document format validation error: {str(e)}")
             return False
 
 # Initialize center management service

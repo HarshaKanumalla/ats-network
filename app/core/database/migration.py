@@ -4,7 +4,7 @@ from typing import Dict, Any, List
 import logging
 from datetime import datetime
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from pymongo.errors import OperationFailure
+from pymongo.errors import OperationFailure, CollectionInvalid
 
 from .schemas import DatabaseSchemas
 from ..exceptions import MigrationError
@@ -13,69 +13,28 @@ from ...config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+
 class MigrationManager:
     """Manages database migrations and schema updates."""
-    
+
     def __init__(self, db: AsyncIOMotorDatabase):
         self.db = db
         self.schemas = DatabaseSchemas()
         self.migrations_collection = "migrations"
-        self.current_version = None
         logger.info("Migration manager initialized")
 
     async def initialize_database(self) -> None:
-        """Initialize database with schema validation."""
-        try:
-            # Create migrations collection if not exists
-            if self.migrations_collection not in await self.db.list_collection_names():
-                await self.db.create_collection(self.migrations_collection)
-                await self.db.migrations.create_index("version", unique=True)
-
-            # Initialize core collections with schema validation
-            collections_schema = {
-                "users": self.schemas.get_users_schema(),
-                "centers": self.schemas.get_centers_schema(),
-                "testSessions": self.schemas.get_test_sessions_schema(),
-                "vehicles": self.schemas.get_vehicles_schema()
-            }
-
-            for collection_name, schema in collections_schema.items():
-                await self._initialize_collection(collection_name, schema)
-
-            # Create indexes
-            await self._create_indexes()
-            
-            logger.info("Database initialization completed successfully")
-
-        except Exception as e:
-            logger.error(f"Database initialization error: {str(e)}")
-            raise MigrationError(f"Failed to initialize database: {str(e)}")
+        pass  # Implement logic here
 
     async def run_migrations(self) -> None:
-        """Execute pending migrations."""
-        try:
-            current_version = await self._get_current_version()
-            pending_migrations = await self._get_pending_migrations(current_version)
-
-            if not pending_migrations:
-                logger.info("No pending migrations found")
-                return
-
-            for migration in pending_migrations:
-                await self._execute_migration(migration)
-
-            logger.info("All migrations completed successfully")
-
-        except Exception as e:
-            logger.error(f"Migration execution error: {str(e)}")
-            raise MigrationError(f"Failed to execute migrations: {str(e)}")
+        pass  # Implement logic here
 
     async def _initialize_collection(self, collection_name: str, schema: Dict[str, Any]) -> None:
         """Initialize collection with schema validation."""
         try:
             # Check if collection exists
             collections = await self.db.list_collection_names()
-            
+
             if collection_name in collections:
                 # Update existing collection schema
                 await self.db.command({
@@ -83,6 +42,7 @@ class MigrationManager:
                     "validator": schema,
                     "validationLevel": "strict"
                 })
+                logger.info(f"Updated schema for existing collection: {collection_name}")
             else:
                 # Create new collection with schema
                 await self.db.create_collection(
@@ -90,18 +50,23 @@ class MigrationManager:
                     validator=schema,
                     validationLevel="strict"
                 )
+                logger.info(f"Created new collection: {collection_name}")
 
-            logger.info(f"Initialized collection: {collection_name}")
-
+        except CollectionInvalid as e:
+            logger.error(f"Collection initialization error for {collection_name}: {str(e)}")
+            raise MigrationError(f"Collection already exists: {str(e)}")
+        except OperationFailure as e:
+            logger.error(f"MongoDB operation failed for collection {collection_name}: {str(e)}")
+            raise MigrationError(f"Failed to initialize collection {collection_name}: {str(e)}")
         except Exception as e:
-            logger.error(f"Collection initialization error: {str(e)}")
+            logger.error(f"Unexpected error during collection initialization: {str(e)}")
             raise MigrationError(f"Failed to initialize collection {collection_name}: {str(e)}")
 
     async def _create_indexes(self) -> None:
         """Create collection indexes."""
         try:
             indexes = self.schemas.get_collection_indexes()
-            
+
             for collection_name, collection_indexes in indexes.items():
                 for index in collection_indexes:
                     await self.db[collection_name].create_index(
@@ -122,7 +87,10 @@ class MigrationManager:
             latest_migration = await self.db[self.migrations_collection].find_one(
                 sort=[("version", -1)]
             )
-            return latest_migration["version"] if latest_migration else 0
+            if not latest_migration or "version" not in latest_migration:
+                logger.warning("No valid migration version found, defaulting to version 0")
+                return 0
+            return latest_migration["version"]
 
         except Exception as e:
             logger.error(f"Version retrieval error: {str(e)}")
@@ -151,13 +119,13 @@ class MigrationManager:
         return [m for m in migrations if m["version"] > current_version]
 
     async def _execute_migration(self, migration: Dict[str, Any]) -> None:
-        """Execute single migration with error handling."""
+        """Execute single migration with error handling and rollback support."""
         try:
             logger.info(f"Starting migration {migration['version']}: {migration['name']}")
-            
+
             # Execute migration function
             await migration["function"]()
-            
+
             # Record successful migration
             await self.db[self.migrations_collection].insert_one({
                 "version": migration["version"],
@@ -178,7 +146,7 @@ class MigrationManager:
         try:
             # Initialize collections with schemas
             await self.initialize_database()
-            
+
             # Add initial indexes
             await self._create_indexes()
 

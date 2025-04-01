@@ -2,9 +2,11 @@
 
 from fastapi import Request, status
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import HTTPException
 from typing import Union, Dict, Any, Callable
 import logging
 from datetime import datetime
+from uuid import uuid4
 
 from ..exceptions import (
     ValidationError, 
@@ -26,7 +28,16 @@ async def error_handler(
     call_next: Callable
 ) -> Union[JSONResponse, Any]:
     try:
-        return await call_next(request)
+        response = await call_next(request)
+        return response
+
+    except HTTPException as e:
+        return create_error_response(
+            request=request,
+            error=e.detail,
+            status_code=e.status_code,
+            error_code="HTTP_EXCEPTION"
+        )
 
     except CustomException as e:
         return create_error_response(
@@ -61,7 +72,7 @@ async def error_handler(
         )
         
     except DatabaseError as e:
-        logger.error(f"Database error: {str(e)}")
+        logger.error(f"Database error on {request.method} {request.url.path}: {str(e)}")
         return create_error_response(
             request=request,
             error=e,
@@ -78,7 +89,7 @@ async def error_handler(
         )
         
     except FileOperationError as e:
-        logger.error(f"File operation error: {str(e)}")
+        logger.error(f"File operation error on {request.method} {request.url.path}: {str(e)}")
         return create_error_response(
             request=request,
             error=e,
@@ -87,7 +98,7 @@ async def error_handler(
         )
 
     except ConfigurationError as e:
-        logger.error(f"Configuration error: {str(e)}")
+        logger.error(f"Configuration error on {request.method} {request.url.path}: {str(e)}")
         return create_error_response(
             request=request,
             error=e,
@@ -96,7 +107,7 @@ async def error_handler(
         )
         
     except Exception as e:
-        logger.exception("Unhandled exception occurred")
+        logger.exception(f"Unhandled exception on {request.method} {request.url.path}")
         return create_error_response(
             request=request,
             error="Internal server error",
@@ -117,21 +128,25 @@ def create_error_response(
         "message": message,
         "error_code": error_code,
         "timestamp": datetime.utcnow().isoformat(),
-        "path": request.url.path
+        "path": request.url.path,
+        "method": request.method
     }
 
     if hasattr(error, 'details') and isinstance(error, Exception):
         content["details"] = error.details
 
     if status_code >= 500:
-        content["request_id"] = generate_request_id()
+        content["request_id"] = get_request_id(request)
 
     return JSONResponse(
         status_code=status_code,
         content=content
     )
 
+def get_request_id(request: Request) -> str:
+    """Retrieve or generate a unique request ID for error tracking."""
+    return request.headers.get("X-Request-ID", generate_request_id())
+
 def generate_request_id() -> str:
-    """Generate a unique request ID for error tracking."""
-    from uuid import uuid4
+    """Generate a unique request ID."""
     return str(uuid4())

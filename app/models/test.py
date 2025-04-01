@@ -1,15 +1,18 @@
-#backend/app/models/test.py
-
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator, field_validator
 from enum import Enum
+import logging
 
 from .common import TimestampedModel, PyObjectId
 from ..core.constants import TestStatus, TestType
 
+logger = logging.getLogger(__name__)
+
 class TestStep(BaseModel):
     """Individual test step in a test procedure."""
+    
+    VALID_COMPLETION_CRITERIA = ["value_threshold", "time_based", "visual_inspection", "operator_confirmation"]
     
     step_number: int
     description: str
@@ -20,8 +23,41 @@ class TestStep(BaseModel):
     estimated_duration: int  # in seconds
     instructions: str
 
+    @field_validator('step_number')
+    def validate_step_number(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("Step number must be positive")
+        return v
+
+    @field_validator('estimated_duration')
+    def validate_duration(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("Duration must be positive")
+        return v
+
+    def validate_completion_criteria(self) -> List[str]:
+        """Validate completion criteria configuration."""
+        errors = []
+        if not self.completion_criteria:
+            errors.append("Completion criteria cannot be empty")
+        else:
+            criteria_type = self.completion_criteria.get("type")
+            if criteria_type not in self.VALID_COMPLETION_CRITERIA:
+                errors.append(f"Invalid completion criteria type: {criteria_type}")
+            
+            # Validate criteria specific requirements
+            if criteria_type == "value_threshold":
+                if "threshold" not in self.completion_criteria:
+                    errors.append("Missing threshold value")
+            elif criteria_type == "time_based":
+                if "duration" not in self.completion_criteria:
+                    errors.append("Missing duration value")
+        return errors
+
 class TestMeasurement(BaseModel):
     """Test measurement data with validation."""
+    
+    VALID_STATUSES = ["pending", "valid", "invalid", "requires_review"]
     
     parameter: str
     value: float
@@ -31,6 +67,22 @@ class TestMeasurement(BaseModel):
     operator_id: PyObjectId
     validation_status: str = "pending"
     validation_notes: Optional[str] = None
+
+    @field_validator('value')
+    def validate_value(cls, v: float) -> float:
+        if not isinstance(v, (int, float)):
+            raise ValueError("Value must be numeric")
+        return float(v)
+
+    @field_validator('validation_status')
+    def validate_status(cls, v: str) -> str:
+        if v not in cls.VALID_STATUSES:
+            raise ValueError(f"Invalid status. Must be one of: {cls.VALID_STATUSES}")
+        return v
+
+    def is_within_range(self, min_value: float, max_value: float) -> bool:
+        """Check if measurement is within specified range."""
+        return min_value <= self.value <= max_value
 
 class QualityCheck(BaseModel):
     """Quality control check for test results."""
@@ -43,6 +95,16 @@ class QualityCheck(BaseModel):
     verification_time: Optional[datetime] = None
     notes: Optional[str] = None
 
+    def evaluate(self) -> bool:
+        """Evaluate quality check result."""
+        if self.check_type == "maximum":
+            return self.actual_value <= self.threshold
+        elif self.check_type == "minimum":
+            return self.actual_value >= self.threshold
+        elif self.check_type == "exact":
+            return abs(self.actual_value - self.threshold) < 0.001
+        return False
+
 class TestVerification(BaseModel):
     """Test result verification details."""
     
@@ -52,6 +114,10 @@ class TestVerification(BaseModel):
     comments: Optional[str] = None
     quality_checks: List[QualityCheck]
     supporting_documents: Optional[List[str]] = None
+
+    def all_checks_passed(self) -> bool:
+        """Check if all quality checks passed."""
+        return all(check.evaluate() for check in self.quality_checks)
 
 class TestProcedure(BaseModel):
     """Complete test procedure definition."""
@@ -64,8 +130,28 @@ class TestProcedure(BaseModel):
     prerequisites: List[str]
     total_duration: int  # in seconds
 
+    def validate_steps_sequence(self) -> List[str]:
+        """Validate test steps sequence."""
+        errors = []
+        step_numbers = [step.step_number for step in self.steps]
+        if len(step_numbers) != len(set(step_numbers)):
+            errors.append("Duplicate step numbers found")
+        if step_numbers != sorted(step_numbers):
+            errors.append("Steps are not in sequential order")
+        return errors
+
 class TestSession(TimestampedModel):
     """Enhanced test session with comprehensive tracking."""
+    
+    VALID_TRANSITIONS = {
+        TestStatus.SCHEDULED: [TestStatus.IN_PROGRESS, TestStatus.CANCELLED],
+        TestStatus.IN_PROGRESS: [TestStatus.COMPLETED, TestStatus.INTERRUPTED],
+        TestStatus.INTERRUPTED: [TestStatus.IN_PROGRESS, TestStatus.CANCELLED],
+        TestStatus.COMPLETED: [TestStatus.VERIFIED, TestStatus.REJECTED],
+        TestStatus.VERIFIED: [],
+        TestStatus.REJECTED: [],
+        TestStatus.CANCELLED: []
+    }
     
     session_code: str = Field(..., regex=r'^TS\d{12}$')
     vehicle_id: PyObjectId
@@ -95,7 +181,47 @@ class TestSession(TimestampedModel):
     final_results: Dict[str, Any] = Field(default_factory=dict)
     verification_status: str = "pending"
     certificate_number: Optional[str] = None
-    
+
+    def update_status(self, new_status: TestStatus) -> None:
+        """Update test status with validation."""
+        if new_status not in self.VALID_TRANSITIONS[self.status]:
+            raise ValueError(
+                f"Invalid status transition from {self.status} to {new_status}"
+            )
+        self.status = new_status
+        logger.info(f"Test session {self.session_code} status updated to {new_status}")
+
+    def start_test(self) -> None:
+        """Start test session."""
+        if self.status != TestStatus.SCHEDULED:
+            raise ValueError(f"Cannot start test in {self.status} status")
+        self.start_time = datetime.utcnow()
+        self.update_status(TestStatus.IN_PROGRESS)
+        logger.info(f"Test session {self.session_code} started")
+
+    def end_test(self) -> None:
+        """End test session."""
+        if self.status != TestStatus.IN_PROGRESS:
+            raise ValueError(f"Cannot end test in {self.status} status")
+        self.end_time = datetime.utcnow()
+        self.duration = int((self.end_time - self.start_time).total_seconds())
+        self.update_status(TestStatus.COMPLETED)
+        logger.info(f"Test session {self.session_code} completed")
+
+    def validate_equipment(self) -> List[str]:
+        """Validate required equipment availability."""
+        errors = []
+        for equipment in self.test_procedure.required_equipment:
+            if equipment not in self.equipment_used:
+                errors.append(f"Missing required equipment: {equipment}")
+        return errors
+
+    def add_issue(self, issue: Dict[str, Any]) -> None:
+        """Record test issue."""
+        issue["timestamp"] = datetime.utcnow()
+        self.issues_detected.append(issue)
+        logger.warning(f"Issue detected in session {self.session_code}: {issue['description']}")
+
     class Config:
         """Model configuration."""
         validate_assignment = True
@@ -103,80 +229,6 @@ class TestSession(TimestampedModel):
             datetime: lambda dt: dt.isoformat(),
             PyObjectId: str
         }
-
-    @validator('session_code')
-    def validate_session_code(cls, v: str) -> str:
-        """Validate test session code format."""
-        if not v.startswith('TS') or not len(v) == 14:
-            raise ValueError("Invalid session code format")
-        return v
-
-    def add_measurement(
-        self,
-        test_type: str,
-        measurement: TestMeasurement
-    ) -> None:
-        """Add new measurement with validation."""
-        if test_type not in self.measurements:
-            self.measurements[test_type] = []
-        self.measurements[test_type].append(measurement)
-
-    def record_interruption(
-        self,
-        reason: str,
-        duration: int,
-        reported_by: PyObjectId
-    ) -> None:
-        """Record test interruption."""
-        self.interruptions.append({
-            "reason": reason,
-            "duration": duration,
-            "reported_by": reported_by,
-            "timestamp": datetime.utcnow()
-        })
-
-    def add_quality_check(self, check: QualityCheck) -> None:
-        """Add quality control check result."""
-        self.quality_checks.append(check)
-
-    def verify_results(
-        self,
-        verification: TestVerification
-    ) -> None:
-        """Add test result verification."""
-        self.verifications.append(verification)
-        if all(check.status == "passed" for check in verification.quality_checks):
-            self.verification_status = "verified"
-        else:
-            self.verification_status = "failed"
-
-    def complete_step(
-        self,
-        step_number: int,
-        completed_by: PyObjectId
-    ) -> None:
-        """Mark test step as completed."""
-        if step_number != self.current_step:
-            raise ValueError("Invalid step number")
-            
-        self.current_step += 1
-        if self.current_step >= len(self.test_procedure.steps):
-            self.status = TestStatus.COMPLETED
-
-    def calculate_results(self) -> Dict[str, Any]:
-        """Calculate final test results."""
-        results = {}
-        for test_type, measurements in self.measurements.items():
-            values = [m.value for m in measurements]
-            results[test_type] = {
-                "average": sum(values) / len(values),
-                "max": max(values),
-                "min": min(values),
-                "count": len(values),
-                "unit": measurements[0].unit
-            }
-        self.final_results = results
-        return results
 
 class TestResult(BaseModel):
     """Test result with detailed analysis."""
@@ -190,7 +242,7 @@ class TestResult(BaseModel):
     pass_fail_status: str
     recommendations: Optional[List[str]] = None
     
-    @validator('pass_fail_status')
+    @field_validator('pass_fail_status')
     def validate_status(cls, v: str) -> str:
         """Validate pass/fail status."""
         if v not in ['pass', 'fail']:
@@ -207,3 +259,33 @@ class TestResult(BaseModel):
             "verification_status": self.verification.status,
             "completion_time": self.verification.verification_time
         }
+
+    def analyze_trends(self) -> Dict[str, Any]:
+        """Analyze measurement trends."""
+        trends = {
+            "increasing": False,
+            "decreasing": False,
+            "stable": False,
+            "fluctuating": False
+        }
+        
+        if len(self.measurements) < 2:
+            return trends
+        
+        values = [m.value for m in self.measurements]
+        diffs = [values[i+1] - values[i] for i in range(len(values)-1)]
+        
+        avg_diff = sum(diffs) / len(diffs)
+        std_dev = (sum((d - avg_diff) ** 2 for d in diffs) / len(diffs)) ** 0.5
+        
+        if abs(avg_diff) < 0.1 * std_dev:
+            trends["stable"] = True
+        elif avg_diff > 0:
+            trends["increasing"] = True
+        else:
+            trends["decreasing"] = True
+            
+        if std_dev > abs(avg_diff) * 2:
+            trends["fluctuating"] = True
+            
+        return trends

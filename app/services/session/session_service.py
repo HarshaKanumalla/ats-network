@@ -1,11 +1,10 @@
-# backend/app/services/session/session_service.py
-
 from typing import Dict, Any, Optional, List
 import logging
 from datetime import datetime, timedelta
 import jwt
 import redis
 from bson import ObjectId
+import json
 
 from ...core.exceptions import SessionError
 from ...database import get_database
@@ -55,7 +54,7 @@ class SessionManagementService:
         user_id: str,
         user_agent: str,
         token_id: str,
-        metadata: Dict[str, Any]
+        metadata: Dict[str, Any],
         ip_address: str
     ) -> Dict[str, Any]:
         """Create new user session with token generation."""
@@ -96,7 +95,7 @@ class SessionManagementService:
             }
             
             result = await db.sessions.insert_one(session_doc)
-            session_doc["_id"] = result.inserted_id
+            session_id = str(result.inserted_id)
 
             # Store in Redis for quick access
             await self.redis.setex(
@@ -105,17 +104,15 @@ class SessionManagementService:
                 json.dumps({
                     "userId": user_id,
                     "tokenId": token_id,
-                    "expiresAt": session["expiresAt"].isoformat()
+                    "expiresAt": session_doc["expiresAt"].isoformat()
                 })
             )
-
-            return session_id
             
             logger.info(f"Created session for user: {user_id}")
             return {
                 "access_token": access_token,
                 "refresh_token": refresh_token,
-                "session_id": str(result.inserted_id)
+                "session_id": session_id
             }
             
         except Exception as e:
@@ -138,6 +135,10 @@ class SessionManagementService:
             # Check if token is blacklisted
             if await self._is_token_blacklisted(refresh_token):
                 raise SessionError("Token has been revoked")
+            
+            # Check if token is expired
+            if datetime.utcnow() > datetime.fromtimestamp(payload["exp"]):
+                raise SessionError("Refresh token has expired")
             
             # Rate limit check
             if not await self._check_rate_limit("refresh", payload["sub"]):
@@ -174,8 +175,7 @@ class SessionManagementService:
             logger.error(f"Token refresh error: {str(e)}")
             raise SessionError("Failed to refresh tokens")
 
-
-     async def validate_session(self, session_id: str) -> bool:
+    async def validate_session(self, session_id: str) -> bool:
         """Validate session status and expiry."""
         try:
             # Check Redis first
@@ -189,7 +189,14 @@ class SessionManagementService:
             if datetime.utcnow() >= expires_at:
                 await self.invalidate_session(session_id)
                 return False
-                
+            
+            # Update last activity in MongoDB
+            db = await get_database()
+            await db.sessions.update_one(
+                {"_id": ObjectId(session_id)},
+                {"$set": {"lastActivity": datetime.utcnow()}}
+            )
+            
             return True
             
         except Exception as e:
@@ -219,6 +226,9 @@ class SessionManagementService:
                     }
                 }
             )
+            
+            # Remove session from Redis
+            await self.redis.delete(f"session:{session_id}")
             
             logger.info(f"Invalidated session: {session_id}")
             
@@ -262,6 +272,7 @@ class SessionManagementService:
             current = await self.redis.get(key)
             
             if current and int(current) >= self.rate_limit_max_requests[action]:
+                logger.warning(f"Rate limit exceeded for action: {action}, user: {user_id}")
                 return False
             
             pipeline = self.redis.pipeline()
@@ -280,7 +291,7 @@ class SessionManagementService:
         payload = {
             "sub": user_id,
             "type": "access",
-            "exp": datetime.utcnow() + self.access_token_lifetime
+            "exp": (datetime.utcnow() + self.access_token_lifetime).timestamp()
         }
         return jwt.encode(
             payload,
@@ -293,7 +304,7 @@ class SessionManagementService:
         payload = {
             "sub": user_id,
             "type": "refresh",
-            "exp": datetime.utcnow() + self.refresh_token_lifetime
+            "exp": (datetime.utcnow() + self.refresh_token_lifetime).timestamp()
         }
         return jwt.encode(
             payload,
@@ -307,7 +318,7 @@ class SessionManagementService:
             key = f"{self.token_blacklist_prefix}{token}"
             await self.redis.setex(
                 key,
-                self.refresh_token_lifetime.total_seconds(),
+                int(self.refresh_token_lifetime.total_seconds()),
                 "1"
             )
         except Exception as e:
@@ -328,10 +339,11 @@ class SessionManagementService:
             pattern = f"{self.token_blacklist_prefix}*"
             keys = await self.redis.keys(pattern)
             
-            if keys:
-                await self.redis.delete(*keys)
+            for key in keys:
+                if await self.redis.ttl(key) <= 0:
+                    await self.redis.delete(key)
                 
-            logger.info(f"Cleaned up {len(keys)} blacklisted tokens")
+            logger.info(f"Cleaned up expired blacklisted tokens")
             
         except Exception as e:
             logger.error(f"Token blacklist cleanup error: {str(e)}")

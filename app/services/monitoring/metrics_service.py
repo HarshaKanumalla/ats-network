@@ -1,5 +1,3 @@
-# backend/app/services/monitoring/metrics_service.py
-
 import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
@@ -31,7 +29,7 @@ class MetricsService:
             'disk_usage': 90.0,         # percentage
             'response_time': 1000,      # milliseconds
             'error_rate': 5.0,          # percentage
-            'connection_limit': 1000     # concurrent connections
+            'connection_limit': 1000    # concurrent connections
         }
         
         # Collection intervals (seconds)
@@ -55,15 +53,13 @@ class MetricsService:
         """Start all monitoring tasks."""
         try:
             monitoring_tasks = [
-                self._collect_system_metrics(),
-                self._collect_application_metrics(),
-                self._collect_performance_metrics(),
-                self._monitor_test_sessions(),
-                self._cleanup_old_metrics()
+                asyncio.create_task(self._collect_system_metrics()),
+                asyncio.create_task(self._collect_application_metrics()),
+                asyncio.create_task(self._collect_performance_metrics()),
+                asyncio.create_task(self._monitor_test_sessions()),
+                asyncio.create_task(self._cleanup_old_metrics())
             ]
-            
             await asyncio.gather(*monitoring_tasks)
-            
         except Exception as e:
             logger.error(f"Monitoring startup error: {str(e)}")
             raise MonitoringError("Failed to start monitoring")

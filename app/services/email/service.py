@@ -1,5 +1,3 @@
-# backend/app/services/email/service.py
-
 from typing import Dict, Any, Optional, List
 import logging
 from email.mime.text import MIMEText
@@ -7,11 +5,12 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 import aiosmtplib
 import jinja2
-import aiofiles
 from pathlib import Path
+import asyncio
 
 from ...core.exceptions import EmailError
 from ...config import get_settings
+from ...database import get_database
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -43,7 +42,36 @@ class EmailService:
         self.retry_attempts = 3
         self.retry_delay = 5  # seconds
 
+        # Validate template directory
+        self._validate_template_directory()
+
         logger.info("Email service initialized with enhanced configuration")
+
+    def _validate_template_directory(self) -> None:
+        """Validate that the email template directory exists."""
+        template_path = Path(__file__).parent.parent / "templates" / "email"
+        if not template_path.exists():
+            logger.error(f"Email template directory not found: {template_path}")
+            raise EmailError(f"Email template directory not found: {template_path}")
+
+    def _get_template(self, template_name: str) -> jinja2.Template:
+        """Load email template with error handling."""
+        try:
+            return self.template_env.get_template(template_name)
+        except jinja2.TemplateNotFound:
+            logger.error(f"Email template not found: {template_name}")
+            raise EmailError(f"Template '{template_name}' not found")
+        except Exception as e:
+            logger.error(f"Error loading template '{template_name}': {str(e)}")
+            raise EmailError(f"Failed to load template '{template_name}'")
+
+    def _validate_email(self, email: str) -> None:
+        """Validate email address format."""
+        import re
+        email_regex = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
+        if not re.match(email_regex, email):
+            logger.error(f"Invalid email address: {email}")
+            raise EmailError(f"Invalid email address: {email}")
 
     async def send_registration_pending(
         self,
@@ -53,7 +81,8 @@ class EmailService:
     ) -> None:
         """Send registration pending notification with enhanced tracking."""
         try:
-            template = self.template_env.get_template("registration_pending.html")
+            self._validate_email(email)
+            template = self._get_template("registration_pending.html")
             html_content = template.render(
                 name=name,
                 email=email,
@@ -88,7 +117,8 @@ class EmailService:
     ) -> None:
         """Send registration approval notification with login credentials."""
         try:
-            template = self.template_env.get_template("registration_approved.html")
+            self._validate_email(email)
+            template = self._get_template("registration_approved.html")
             html_content = template.render(
                 name=name,
                 email=email,
@@ -123,7 +153,8 @@ class EmailService:
     ) -> None:
         """Send password reset email with secure token."""
         try:
-            template = self.template_env.get_template("password_reset.html")
+            self._validate_email(email)
+            template = self._get_template("password_reset.html")
             reset_link = f"{settings.FRONTEND_URL}/reset-password?token={reset_token}"
             
             html_content = template.render(
@@ -158,7 +189,8 @@ class EmailService:
     ) -> None:
         """Send role update notification."""
         try:
-            template = self.template_env.get_template("role_update.html")
+            self._validate_email(email)
+            template = self._get_template("role_update.html")
             html_content = template.render(
                 name=name,
                 role=new_role,
@@ -194,6 +226,7 @@ class EmailService:
         attempts = 0
         while attempts < self.retry_attempts:
             try:
+                logger.info(f"Attempting to send email to {recipient} (Attempt {attempts + 1})")
                 message = MIMEMultipart('alternative')
                 message['Subject'] = subject
                 message['From'] = settings.MAIL_FROM
@@ -222,6 +255,7 @@ class EmailService:
 
             except Exception as e:
                 attempts += 1
+                logger.warning(f"Email send attempt {attempts} failed: {str(e)}")
                 if attempts == self.retry_attempts:
                     await self._log_email_failure(
                         recipient=recipient,
@@ -246,8 +280,9 @@ class EmailService:
                 "status": "sent",
                 "timestamp": datetime.utcnow()
             }
-            # Implementation for logging to database or monitoring system
-            pass
+            db = await get_database()
+            await db.email_logs.insert_one(log_entry)
+            logger.info(f"Logged successful email to {recipient}")
         except Exception as e:
             logger.error(f"Email logging error: {str(e)}")
 
@@ -266,8 +301,9 @@ class EmailService:
                 "status": "failed",
                 "timestamp": datetime.utcnow()
             }
-            # Implementation for logging to database or monitoring system
-            pass
+            db = await get_database()
+            await db.email_logs.insert_one(log_entry)
+            logger.info(f"Logged failed email to {recipient}")
         except Exception as e:
             logger.error(f"Email failure logging error: {str(e)}")
 

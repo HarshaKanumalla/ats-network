@@ -1,10 +1,8 @@
-# backend/app/services/s3/service.py
-
 import boto3
 from botocore.exceptions import ClientError
 from typing import Optional, Dict, Any, BinaryIO, List
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import mimetypes
 import hashlib
 import asyncio
@@ -79,8 +77,6 @@ class S3Service:
             }
         }
         
-        # Initialize storage
-        self._ensure_storage_setup()
         logger.info("S3 service initialized with enhanced configuration")
 
     async def upload_document(
@@ -92,6 +88,9 @@ class S3Service:
     ) -> str:
         """Upload document with comprehensive validation and organization."""
         try:
+            # Validate folder structure
+            self._validate_folder_structure(folder)
+            
             # Validate file
             await self._validate_file(file)
             
@@ -169,7 +168,7 @@ class S3Service:
             await self._verify_file_exists(file_key)
             
             # Delete file
-            await self.s3_client.delete_object(
+            self.s3_client.delete_object(
                 Bucket=self.bucket_name,
                 Key=file_key
             )
@@ -186,15 +185,26 @@ class S3Service:
             logger.error(f"File deletion error: {str(e)}")
             raise StorageError("Failed to delete document")
 
+    def _validate_folder_structure(self, folder: str) -> None:
+        """Validate folder structure against predefined rules."""
+        folder_parts = folder.strip('/').split('/')
+        current_level = self.folder_structure
+        
+        for part in folder_parts:
+            if part not in current_level:
+                raise StorageError(f"Invalid folder structure: {folder}")
+            current_level = current_level[part]
+
     async def _handle_multipart_upload(
         self,
         file: UploadFile,
         upload_args: Dict[str, Any]
     ) -> str:
         """Handle large file uploads using multipart upload."""
+        upload_id = None
         try:
             # Initiate multipart upload
-            response = await self.s3_client.create_multipart_upload(**upload_args)
+            response = self.s3_client.create_multipart_upload(**upload_args)
             upload_id = response['UploadId']
             
             parts = []
@@ -206,7 +216,7 @@ class S3Service:
                     break
                 
                 # Upload part
-                response = await self.s3_client.upload_part(
+                response = self.s3_client.upload_part(
                     Bucket=self.bucket_name,
                     Key=upload_args['Key'],
                     UploadId=upload_id,
@@ -222,7 +232,7 @@ class S3Service:
                 part_number += 1
             
             # Complete multipart upload
-            await self.s3_client.complete_multipart_upload(
+            self.s3_client.complete_multipart_upload(
                 Bucket=self.bucket_name,
                 Key=upload_args['Key'],
                 UploadId=upload_id,
@@ -233,12 +243,13 @@ class S3Service:
             
         except Exception as e:
             if upload_id:
-                await self.s3_client.abort_multipart_upload(
+                self.s3_client.abort_multipart_upload(
                     Bucket=self.bucket_name,
                     Key=upload_args['Key'],
                     UploadId=upload_id
                 )
-            raise
+            logger.error(f"Multipart upload error: {str(e)}")
+            raise StorageError("Failed to complete multipart upload")
 
     async def _validate_file(self, file: UploadFile) -> None:
         """Validate file with comprehensive checks."""
@@ -279,7 +290,6 @@ class S3Service:
         """Scan file content for potential security threats."""
         try:
             # Implement virus scanning or content validation
-            # This could integrate with virus scanning services
             pass
         except Exception as e:
             logger.error(f"File scanning error: {str(e)}")
